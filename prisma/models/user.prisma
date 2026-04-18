@@ -1,0 +1,45 @@
+model User {
+  id          Int       @id @default(autoincrement())
+  name        String
+  code        String       @unique
+  phone       String       @unique
+  imageURL    String?
+  password    String?
+  createdAt   DateTime @default(now())
+
+  permissions Permission[]
+  sessions    Session[]
+  uploadBatches UploadBatch[]
+}
+
+model Access {
+  id          Int  @id @default(autoincrement())
+  name        String
+  description String?
+  code        String @unique
+  createdAt DateTime @default(now())
+
+  permissions Permission[]
+}
+
+model Permission {
+  id       Int  @id @default(autoincrement())
+  userCode   String
+  accessCode String
+  status   Boolean @default(true)
+  createdAt DateTime @default(now())
+
+  user   User   @relation(fields: [userCode], references: [code])
+  access Access @relation(fields: [accessCode], references: [code])
+
+  @@unique([userCode, accessCode])
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userCode  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user    User   @relation(fields: [userCode], references: [code])
+}

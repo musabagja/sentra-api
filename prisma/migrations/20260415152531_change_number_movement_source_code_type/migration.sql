@@ -1,0 +1,7 @@
+-- AlterTable
+ALTER TABLE "CardMovement" ALTER COLUMN "sourceCode" SET DATA TYPE TEXT,
+ALTER COLUMN "targetCode" SET DATA TYPE TEXT;
+
+-- AlterTable
+ALTER TABLE "NumberMovement" ALTER COLUMN "sourceCode" SET DATA TYPE TEXT,
+ALTER COLUMN "targetCode" SET DATA TYPE TEXT;
