@@ -1,0 +1,248 @@
+enum CheckpointType {
+  DC
+  STORE
+  HQ
+}
+
+enum ItemStatus {
+  VERIFIED
+  SOLD
+  HOLD
+  UNVERIFIED
+}
+
+enum DistributionStatus {
+  DELIVERED
+  SCHEDULED
+  HOLD
+}
+
+enum MovementType {
+  INITIAL
+  TRANSFER
+  SALE
+  ADJUSTMENT
+  RETURN
+}
+
+enum OpnameItemType {
+  ICCID
+  MSISDN
+}
+
+enum OpnameConditionStatus {
+  OK
+  BROKEN
+  LOST
+}
+
+//
+// CORE TABLES
+//
+
+model Checkpoint {
+  id   Int         @id @default(autoincrement())
+  code String         @unique
+  type CheckpointType
+  name String
+  createdAt  DateTime  @default(now())
+
+  cards                  Card[]
+  cardStock              CardStock[]
+  numbers                Number[]
+  cardMovementsAsSource  CardMovement[]  @relation("CardMovementSource")
+  cardMovementsAsTarget  CardMovement[]  @relation("CardMovementTarget")
+  numberMovementsAsSource NumberMovement[] @relation("NumberMovementSource")
+  numberMovementsAsTarget NumberMovement[] @relation("NumberMovementTarget")
+}
+
+model Card {
+  id             Int     @id @default(autoincrement())
+  name           String?
+  key            String     @unique
+  checkpointCode String
+  status         ItemStatus @default(UNVERIFIED)
+  remark         String?
+  batchCode      String
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  checkpoint        Checkpoint         @relation(fields: [checkpointCode], references: [code])
+  uploadBatch       UploadBatch        @relation(fields: [batchCode], references: [code])
+  movements         CardMovement[]
+  distributionItems DistributionItem[]
+  merges            Merge[]
+
+  @@index([batchCode])
+  @@index([checkpointCode])
+  @@index([status])
+}
+
+model Number {
+  id             Int     @id @default(autoincrement())
+  name           String?
+  key            String     @unique
+  checkpointCode String?
+  status         ItemStatus @default(VERIFIED)
+  remark         String?
+  batchCode      String
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  checkpoint Checkpoint?      @relation(fields: [checkpointCode], references: [code])
+  uploadBatch UploadBatch    @relation(fields: [batchCode], references: [code])
+  movements  NumberMovement[]
+  merges     Merge[]
+
+  @@index([batchCode])
+  @@index([checkpointCode])
+  @@index([status])
+}
+
+//
+// UPLOAD BATCH
+//
+
+model UploadBatch {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  name      String?
+  userCode  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userCode], references: [code])
+  cards   Card[]
+  numbers Number[]
+}
+
+//
+// MERGE (SALE BINDING)
+//
+
+model Merge {
+  id         Int    @id @default(autoincrement())
+  numberKey  String    @unique
+  cardKey    String    @unique
+  remark     String?
+  verifiedAt DateTime?
+  soldAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  number Number @relation(fields: [numberKey], references: [key])
+  card   Card   @relation(fields: [cardKey], references: [key])
+
+  @@index([soldAt])
+}
+
+//
+// STOCK SNAPSHOT (CACHE TABLE)
+//
+
+model CardStock {
+  id             Int   @id @default(autoincrement())
+  checkpointCode String
+  amount         BigInt
+  updatedAt      DateTime @updatedAt
+  createdAt  DateTime  @default(now())
+
+  checkpoint Checkpoint @relation(fields: [checkpointCode], references: [code])
+}
+
+//
+// MOVEMENTS
+//
+
+model CardMovement {
+  id         Int       @id @default(autoincrement())
+  cardID     Int
+  type       MovementType
+  userCode   String
+  sourceCode String?
+  targetCode String?
+  createdAt  DateTime     @default(now())
+
+  card Card @relation(fields: [cardID], references: [id])
+  source Checkpoint? @relation(name: "CardMovementSource", fields: [sourceCode], references: [code])
+  target Checkpoint? @relation(name: "CardMovementTarget", fields: [targetCode], references: [code])
+
+  @@index([cardID])
+  @@index([createdAt])
+}
+
+model NumberMovement {
+  id         Int       @id @default(autoincrement())
+  numberID   Int
+  type       MovementType
+  userCode   String
+  sourceCode String?
+  targetCode String?
+  createdAt  DateTime     @default(now())
+
+  number Number @relation(fields: [numberID], references: [id])
+  source Checkpoint? @relation(name: "NumberMovementSource", fields: [sourceCode], references: [code])
+  target Checkpoint? @relation(name: "NumberMovementTarget", fields: [targetCode], references: [code])
+
+  @@index([numberID])
+  @@index([createdAt])
+}
+
+//
+// DISTRIBUTION
+//
+
+model Distribution {
+  id         Int             @id @default(autoincrement())
+  sourceCode String
+  targetCode String
+  batch      String?
+  amount     BigInt
+  status     DistributionStatus
+  userCode   String
+  scheduledAt DateTime?
+  completedAt DateTime?
+  createdAt  DateTime           @default(now())
+
+  items DistributionItem[]
+}
+
+model DistributionItem {
+  id             Int   @id @default(autoincrement())
+  itemKey        String
+  distributionID Int
+  createdAt      DateTime @default(now())
+
+  card         Card         @relation(fields: [itemKey], references: [key])
+  distribution Distribution @relation(fields: [distributionID], references: [id])
+
+  @@index([distributionID])
+}
+
+//
+// STOCK OPNAME
+//
+
+model Opname {
+  id             Int         @id @default(autoincrement())
+  amount         BigInt
+  batch          String?
+  type           OpnameItemType
+  checkpointCode String
+  userCode       Int
+  createdAt      DateTime       @default(now())
+
+  updates OpnameUpdate[]
+}
+
+model OpnameUpdate {
+  id        Int                @id @default(autoincrement())
+  itemID    Int
+  status    OpnameConditionStatus
+  opnameID  Int
+  userCode  String
+  createdAt DateTime              @default(now())
+
+  opname Opname @relation(fields: [opnameID], references: [id])
+
+  @@index([itemID])
+}

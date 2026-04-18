@@ -1,18 +1,40 @@
 {
-  "name": "demo",
-  "version": "0.0.0",
+  "name": "sentra-api",
+  "version": "1.0.0",
   "private": "true",
-  "main": "server.js",
+  "main": "server.ts",
+  "type": "module",
   "scripts": {
     "test": "mocha --exit tests/*",
-    "start": "node server.js"
+    "start": "tsx watch server.ts"
   },
   "license": "MIT",
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/mssql": "^9.1.9",
+    "@types/multer": "^2.1.0",
+    "@types/node": "^25.2.3",
+    "@types/pg": "^8.16.0",
     "mocha": "^10.2.0",
-    "supertest": "^6.3.4"
+    "prisma": "^7.4.0",
+    "supertest": "^6.3.4",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "@prisma/adapter-mssql": "^7.4.0",
+    "@prisma/adapter-pg": "^7.4.0",
+    "@prisma/client": "^7.4.0",
+    "bcrypt": "^6.0.0",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "pg": "^8.18.0",
+    "xlsx": "^0.18.5"
   }
 }

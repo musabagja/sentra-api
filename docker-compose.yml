@@ -1,0 +1,36 @@
+services:
+  sentra-api:
+    image: sentra-api:latest
+    build:
+      context: .
+    container_name: sentra-api
+    ports:
+      - "3000:5000"
+    volumes:
+      - .:/app
+      - ./node_modules:/app/node_modules
+    env_file:
+      - .env
+
+  sentra-db:
+    image: postgres:18
+    container_name: sentra-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sentra
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+
+  tooling:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+      - ./node_modules:/app/node_modules
+
+volumes:
+  postgres_data:
