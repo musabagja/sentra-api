@@ -7,6 +7,8 @@ enum CheckpointType {
 enum ItemStatus {
   VERIFIED
   SOLD
+  BROKEN
+  LOST
   HOLD
   UNVERIFIED
 }
@@ -72,6 +74,7 @@ model Card {
   batchCode      String
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
+  validatedAt     DateTime?
 
   checkpoint        Checkpoint         @relation(fields: [checkpointCode], references: [code])
   uploadBatch       UploadBatch        @relation(fields: [batchCode], references: [code])

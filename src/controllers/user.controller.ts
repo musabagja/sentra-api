@@ -59,7 +59,7 @@ class UserController {
       res.cookie('access_token', accessToken, {
         httpOnly: true,
         secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
+        sameSite: isProduction ? 'none' : 'none',
         maxAge: 15 * 60 * 1000,
         signed: isProduction ? true : false
       })
@@ -67,7 +67,7 @@ class UserController {
       res.cookie('refresh_token', refreshToken, {
         httpOnly: true,
         secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
+        sameSite: isProduction ? 'none' : 'none',
         maxAge: 7 * 24 * 60 * 60 * 1000,
         signed: isProduction ? true : false
       })
@@ -148,7 +148,7 @@ class UserController {
       res.cookie('refresh_token', newRefreshToken, {
         httpOnly: true,
         secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
+        sameSite: isProduction ? 'none' : 'none',
         maxAge: 7 * 24 * 60 * 60 * 1000,
         signed: isProduction ? true : false
       })
@@ -156,7 +156,7 @@ class UserController {
       res.cookie('access_token', newAccessToken, {
         httpOnly: true,
         secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
+        sameSite: isProduction ? 'none' : 'none',
         maxAge: 15 * 60 * 1000,
         signed: isProduction ? true : false
       })

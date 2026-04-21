@@ -81,7 +81,8 @@ export const CardScalarFieldEnum = {
     remark: 'remark',
     batchCode: 'batchCode',
     createdAt: 'createdAt',
-    updatedAt: 'updatedAt'
+    updatedAt: 'updatedAt',
+    validatedAt: 'validatedAt'
 };
 export const NumberScalarFieldEnum = {
     id: 'id',
