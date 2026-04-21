@@ -7,4 +7,4 @@ RUN pnpm install
 RUN npx prisma generate
 COPY . .
 EXPOSE 5000
-CMD [ "pnpm", "start" ]
+CMD ["sh", "-c", "npx prisma migrate deploy && pnpm start"]
