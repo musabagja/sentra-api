@@ -42,6 +42,7 @@ export const ModelName = {
     Checkpoint: 'Checkpoint',
     Card: 'Card',
     Number: 'Number',
+    UploadBatch: 'UploadBatch',
     Merge: 'Merge',
     CardStock: 'CardStock',
     CardMovement: 'CardMovement',
@@ -52,7 +53,8 @@ export const ModelName = {
     OpnameUpdate: 'OpnameUpdate',
     User: 'User',
     Access: 'Access',
-    Permission: 'Permission'
+    Permission: 'Permission',
+    Session: 'Session'
 };
 /*
  * Enums
@@ -77,6 +79,7 @@ export const CardScalarFieldEnum = {
     checkpointCode: 'checkpointCode',
     status: 'status',
     remark: 'remark',
+    batchCode: 'batchCode',
     createdAt: 'createdAt',
     updatedAt: 'updatedAt'
 };
@@ -87,6 +90,15 @@ export const NumberScalarFieldEnum = {
     checkpointCode: 'checkpointCode',
     status: 'status',
     remark: 'remark',
+    batchCode: 'batchCode',
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt'
+};
+export const UploadBatchScalarFieldEnum = {
+    id: 'id',
+    code: 'code',
+    name: 'name',
+    userCode: 'userCode',
     createdAt: 'createdAt',
     updatedAt: 'updatedAt'
 };
@@ -117,7 +129,7 @@ export const CardMovementScalarFieldEnum = {
 };
 export const NumberMovementScalarFieldEnum = {
     id: 'id',
-    numberId: 'numberId',
+    numberID: 'numberID',
     type: 'type',
     userCode: 'userCode',
     sourceCode: 'sourceCode',
@@ -132,18 +144,22 @@ export const DistributionScalarFieldEnum = {
     amount: 'amount',
     status: 'status',
     userCode: 'userCode',
+    scheduledAt: 'scheduledAt',
+    completedAt: 'completedAt',
     createdAt: 'createdAt'
 };
 export const DistributionItemScalarFieldEnum = {
     id: 'id',
-    itemID: 'itemID',
+    itemKey: 'itemKey',
     distributionID: 'distributionID',
     createdAt: 'createdAt'
 };
 export const OpnameScalarFieldEnum = {
     id: 'id',
     amount: 'amount',
+    progress: 'progress',
     batch: 'batch',
+    status: 'status',
     type: 'type',
     checkpointCode: 'checkpointCode',
     userCode: 'userCode',
@@ -178,6 +194,12 @@ export const PermissionScalarFieldEnum = {
     userCode: 'userCode',
     accessCode: 'accessCode',
     status: 'status',
+    createdAt: 'createdAt'
+};
+export const SessionScalarFieldEnum = {
+    id: 'id',
+    userCode: 'userCode',
+    expiresAt: 'expiresAt',
     createdAt: 'createdAt'
 };
 export const SortOrder = {

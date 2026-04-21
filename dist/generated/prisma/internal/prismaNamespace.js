@@ -37,12 +37,12 @@ export const Sql = runtime.Sql;
 export const Decimal = runtime.Decimal;
 export const getExtensionContext = runtime.Extensions.getExtensionContext;
 /**
- * Prisma Client JS version: 7.4.0
- * Query Engine version: ab56fe763f921d033a6c195e7ddeb3e255bdbb57
+ * Prisma Client JS version: 7.7.0
+ * Query Engine version: 75cbdc1eb7150937890ad5465d861175c6624711
  */
 export const prismaVersion = {
-    client: "7.4.0",
-    engine: "ab56fe763f921d033a6c195e7ddeb3e255bdbb57"
+    client: "7.7.0",
+    engine: "75cbdc1eb7150937890ad5465d861175c6624711"
 };
 export const NullTypes = {
     DbNull: runtime.NullTypes.DbNull,
@@ -71,6 +71,7 @@ export const ModelName = {
     Checkpoint: 'Checkpoint',
     Card: 'Card',
     Number: 'Number',
+    UploadBatch: 'UploadBatch',
     Merge: 'Merge',
     CardStock: 'CardStock',
     CardMovement: 'CardMovement',
@@ -81,7 +82,8 @@ export const ModelName = {
     OpnameUpdate: 'OpnameUpdate',
     User: 'User',
     Access: 'Access',
-    Permission: 'Permission'
+    Permission: 'Permission',
+    Session: 'Session'
 };
 /**
  * Enums
@@ -106,6 +108,7 @@ export const CardScalarFieldEnum = {
     checkpointCode: 'checkpointCode',
     status: 'status',
     remark: 'remark',
+    batchCode: 'batchCode',
     createdAt: 'createdAt',
     updatedAt: 'updatedAt'
 };
@@ -116,6 +119,15 @@ export const NumberScalarFieldEnum = {
     checkpointCode: 'checkpointCode',
     status: 'status',
     remark: 'remark',
+    batchCode: 'batchCode',
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt'
+};
+export const UploadBatchScalarFieldEnum = {
+    id: 'id',
+    code: 'code',
+    name: 'name',
+    userCode: 'userCode',
     createdAt: 'createdAt',
     updatedAt: 'updatedAt'
 };
@@ -146,7 +158,7 @@ export const CardMovementScalarFieldEnum = {
 };
 export const NumberMovementScalarFieldEnum = {
     id: 'id',
-    numberId: 'numberId',
+    numberID: 'numberID',
     type: 'type',
     userCode: 'userCode',
     sourceCode: 'sourceCode',
@@ -161,18 +173,22 @@ export const DistributionScalarFieldEnum = {
     amount: 'amount',
     status: 'status',
     userCode: 'userCode',
+    scheduledAt: 'scheduledAt',
+    completedAt: 'completedAt',
     createdAt: 'createdAt'
 };
 export const DistributionItemScalarFieldEnum = {
     id: 'id',
-    itemID: 'itemID',
+    itemKey: 'itemKey',
     distributionID: 'distributionID',
     createdAt: 'createdAt'
 };
 export const OpnameScalarFieldEnum = {
     id: 'id',
     amount: 'amount',
+    progress: 'progress',
     batch: 'batch',
+    status: 'status',
     type: 'type',
     checkpointCode: 'checkpointCode',
     userCode: 'userCode',
@@ -207,6 +223,12 @@ export const PermissionScalarFieldEnum = {
     userCode: 'userCode',
     accessCode: 'accessCode',
     status: 'status',
+    createdAt: 'createdAt'
+};
+export const SessionScalarFieldEnum = {
+    id: 'id',
+    userCode: 'userCode',
+    expiresAt: 'expiresAt',
     createdAt: 'createdAt'
 };
 export const SortOrder = {

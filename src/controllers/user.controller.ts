@@ -88,7 +88,7 @@ class UserController {
 
   static async refreshToken(req: Request, res: Response, next: NextFunction) { 
     try {
-      const refreshToken = req.cookies.refresh_token;
+      const refreshToken = req.signedCookies.refresh_token;
 
       if (!refreshToken) {
         throw new Error('Session expired, please sign in again.')
@@ -171,7 +171,7 @@ class UserController {
 
   static async signOut(req: Request, res: Response, next: NextFunction) {
     try {
-      const refreshToken = req.cookies.refresh_token;
+      const refreshToken = req.signedCookies.refresh_token;
       
       if (!refreshToken) {
         throw new Error('Session already signed out.')

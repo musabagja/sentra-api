@@ -13,11 +13,14 @@ export const CheckpointType = {
     HQ: 'HQ'
 };
 export const ItemStatus = {
-    AVAILABLE: 'AVAILABLE',
-    UNAVAILABLE: 'UNAVAILABLE'
+    VERIFIED: 'VERIFIED',
+    SOLD: 'SOLD',
+    HOLD: 'HOLD',
+    UNVERIFIED: 'UNVERIFIED'
 };
 export const DistributionStatus = {
     DELIVERED: 'DELIVERED',
+    SCHEDULED: 'SCHEDULED',
     HOLD: 'HOLD'
 };
 export const MovementType = {
@@ -30,6 +33,11 @@ export const MovementType = {
 export const OpnameItemType = {
     ICCID: 'ICCID',
     MSISDN: 'MSISDN'
+};
+export const OpnameStatus = {
+    RUNNING: 'RUNNING',
+    COMPLETED: 'COMPLETED',
+    CANCELLED: 'CANCELLED'
 };
 export const OpnameConditionStatus = {
     OK: 'OK',
