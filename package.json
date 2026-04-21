@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "test": "mocha --exit tests/*",
-    "start": "tsx watch server.ts",
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "tsc",
     "postinstall": "prisma generate"
   },
   "license": "MIT",
