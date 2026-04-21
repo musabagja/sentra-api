@@ -1,9 +1,10 @@
 import JWT from "../utils/jwt.util";
 import prisma from "../../lib/prisma";
+const isProduction = process.env.NODE_ENV === "production";
 class Auth {
     static async authenticate(req, res, next) {
         try {
-            const token = req.signedCookies["access_token"];
+            const token = isProduction ? req.signedCookies["access_token"] : req.cookies["access_token"];
             if (!token) {
                 throw new Error('Unauthorized');
             }

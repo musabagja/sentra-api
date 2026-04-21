@@ -61,7 +61,7 @@ class UserController {
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
         maxAge: 15 * 60 * 1000,
-        signed: true
+        signed: isProduction ? true : false
       })
 
       res.cookie('refresh_token', refreshToken, {
@@ -69,7 +69,7 @@ class UserController {
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
         maxAge: 7 * 24 * 60 * 60 * 1000,
-        signed: true
+        signed: isProduction ? true : false
       })
 
       res.status(200).json({
@@ -88,7 +88,7 @@ class UserController {
 
   static async refreshToken(req: Request, res: Response, next: NextFunction) { 
     try {
-      const refreshToken = req.signedCookies.refresh_token;
+      const refreshToken = isProduction ? req.signedCookies["refresh_token"] : req.cookies["refresh_token"];
 
       if (!refreshToken) {
         throw new Error('Session expired, please sign in again.')
@@ -150,7 +150,7 @@ class UserController {
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
         maxAge: 7 * 24 * 60 * 60 * 1000,
-        signed: true
+        signed: isProduction ? true : false
       })
 
       res.cookie('access_token', newAccessToken, {
@@ -158,7 +158,7 @@ class UserController {
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
         maxAge: 15 * 60 * 1000,
-        signed: true
+        signed: isProduction ? true : false
       })
 
       res.status(200).json({
