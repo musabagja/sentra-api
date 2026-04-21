@@ -30,6 +30,12 @@ enum OpnameItemType {
   MSISDN
 }
 
+enum OpnameStatus {
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
 enum OpnameConditionStatus {
   OK
   BROKEN
@@ -142,7 +148,7 @@ model Merge {
 model CardStock {
   id             Int   @id @default(autoincrement())
   checkpointCode String
-  amount         BigInt
+  amount         Int
   updatedAt      DateTime @updatedAt
   createdAt  DateTime  @default(now())
 
@@ -196,7 +202,7 @@ model Distribution {
   sourceCode String
   targetCode String
   batch      String?
-  amount     BigInt
+  amount     Int
   status     DistributionStatus
   userCode   String
   scheduledAt DateTime?
@@ -224,11 +230,13 @@ model DistributionItem {
 
 model Opname {
   id             Int         @id @default(autoincrement())
-  amount         BigInt
-  batch          String?
+  amount         Int
+  progress       Int
+  batch          String
+  status         OpnameStatus
   type           OpnameItemType
   checkpointCode String
-  userCode       Int
+  userCode       String
   createdAt      DateTime       @default(now())
 
   updates OpnameUpdate[]

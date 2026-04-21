@@ -8,6 +8,7 @@ model User {
   createdAt   DateTime @default(now())
 
   permissions Permission[]
+  accesses    Access[]
   sessions    Session[]
   uploadBatches UploadBatch[]
 }
@@ -20,6 +21,7 @@ model Access {
   createdAt DateTime @default(now())
 
   permissions Permission[]
+  users       User[]
 }
 
 model Permission {

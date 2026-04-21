@@ -3,6 +3,8 @@ import prisma from '../../lib/prisma';
 import Bcrypt from '../utils/bcrypt.util';
 import JWT from '../utils/jwt.util';
 
+const isProduction = process.env.NODE_ENV === "production"
+
 class UserController {
   static async signIn(req: Request, res: Response, next: NextFunction) {
     try {
@@ -11,6 +13,13 @@ class UserController {
       const user = await prisma.user.findFirst({
         where: {
           code
+        },
+        include: {
+          permissions: {
+            include: {
+              access: true
+            }
+          }
         }
       });
 
@@ -49,20 +58,26 @@ class UserController {
 
       res.cookie('access_token', accessToken, {
         httpOnly: true,
-        secure: true,
-        sameSite: 'strict',
+        secure: isProduction,
+        sameSite: isProduction ? 'strict' : 'lax',
         maxAge: 15 * 60 * 1000
       })
 
       res.cookie('refresh_token', refreshToken, {
         httpOnly: true,
-        secure: true,
-        sameSite: 'strict',
+        secure: isProduction,
+        sameSite: isProduction ? 'strict' : 'lax',
         maxAge: 7 * 24 * 60 * 60 * 1000
       })
 
       res.status(200).json({
-        message: 'Sign-in successful'
+        message: 'Sign-in successful',
+        data: {
+          userName: user.name,
+          userImageURL: user.imageURL,
+          userCode: user.code,
+          accesses: user.permissions.map(each=> each.access)
+        }
       })
     } catch (error) {
       next(error)
@@ -130,15 +145,15 @@ class UserController {
 
       res.cookie('refresh_token', newRefreshToken, {
         httpOnly: true,
-        secure: true,
-        sameSite: 'strict',
+        secure: isProduction,
+        sameSite: isProduction ? 'strict' : 'lax',
         maxAge: 7 * 24 * 60 * 60 * 1000
       })
 
       res.cookie('access_token', newAccessToken, {
         httpOnly: true,
-        secure: true,
-        sameSite: 'strict',
+        secure: isProduction,
+        sameSite: isProduction ? 'strict' : 'lax',
         maxAge: 15 * 60 * 1000
       })
 
