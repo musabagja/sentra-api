@@ -60,14 +60,16 @@ class UserController {
         httpOnly: true,
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
-        maxAge: 15 * 60 * 1000
+        maxAge: 15 * 60 * 1000,
+        signed: true
       })
 
       res.cookie('refresh_token', refreshToken, {
         httpOnly: true,
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
-        maxAge: 7 * 24 * 60 * 60 * 1000
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+        signed: true
       })
 
       res.status(200).json({
@@ -147,14 +149,16 @@ class UserController {
         httpOnly: true,
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
-        maxAge: 7 * 24 * 60 * 60 * 1000
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+        signed: true
       })
 
       res.cookie('access_token', newAccessToken, {
         httpOnly: true,
         secure: isProduction,
         sameSite: isProduction ? 'none' : 'lax',
-        maxAge: 15 * 60 * 1000
+        maxAge: 15 * 60 * 1000,
+        signed: true
       })
 
       res.status(200).json({

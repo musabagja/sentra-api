@@ -5,7 +5,7 @@ import prisma from "../../lib/prisma";
 class Auth {
   static async authenticate(req: Request, res: Response, next: NextFunction) {
     try {
-      const token = req.cookies["access_token"];
+      const token = req.signedCookies["access_token"];
 
       if (!token) {
         throw new Error('Unauthorized')
