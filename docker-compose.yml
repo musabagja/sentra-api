@@ -26,7 +26,8 @@ services:
       - postgres_data:/var/lib/postgresql
 
   tooling:
-    image: node:22-alpine
+    build:
+      context: .
     working_dir: /app
     volumes:
       - .:/app

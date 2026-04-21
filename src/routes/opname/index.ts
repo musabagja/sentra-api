@@ -19,6 +19,9 @@ router.get('/:id', OpnameController.getOpname);
 // PUT /api/opname/:id - Update a specific opname
 router.put('/:id', OpnameController.updateOpname);
 
+// PATCH /api/opname/:id - Update a specific opname progress
+router.patch('/:id', OpnameController.updateOpnameProgress);
+
 // DELETE /api/opname/:id - Delete a specific opname
 router.delete('/:id', OpnameController.deleteOpname);
 
