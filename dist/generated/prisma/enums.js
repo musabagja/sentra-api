@@ -15,6 +15,8 @@ export const CheckpointType = {
 export const ItemStatus = {
     VERIFIED: 'VERIFIED',
     SOLD: 'SOLD',
+    BROKEN: 'BROKEN',
+    LOST: 'LOST',
     HOLD: 'HOLD',
     UNVERIFIED: 'UNVERIFIED'
 };

@@ -1,5 +1,6 @@
 import prisma from '../../lib/prisma';
 import * as xlsx from 'xlsx';
+import { ItemStatus } from '../../generated/prisma/enums';
 class StockController {
     // ============================================================================
     // CARD CRUD OPERATIONS
@@ -30,7 +31,7 @@ class StockController {
     }
     static async getCards(req, res, next) {
         try {
-            const { page = 1, limit = 10, checkpointCode, status, search } = req.query;
+            const { page = 1, limit = 10, checkpointCode, status, search, uploadAt, batch, validatedAt } = req.query;
             const where = {};
             if (checkpointCode)
                 where.checkpointCode = checkpointCode;
@@ -42,6 +43,30 @@ class StockController {
                     { name: { contains: search, mode: 'insensitive' } }
                 ];
             }
+            // validatedAt filter (related via Card -> Merge)
+            if (validatedAt) {
+                where.merges = {
+                    some: {
+                        validatedAt: {
+                            gte: new Date(`${validatedAt}T00:00:00.000Z`),
+                            lt: new Date(`${validatedAt}T23:59:59.999Z`)
+                        }
+                    }
+                };
+            }
+            if (uploadAt || batch) {
+                where.uploadBatch = {
+                    ...(uploadAt && {
+                        createdAt: {
+                            gte: new Date(`${uploadAt}T00:00:00.000Z`),
+                            lt: new Date(`${uploadAt}T23:59:59.999Z`)
+                        }
+                    }),
+                    ...(batch && {
+                        code: { contains: batch, mode: 'insensitive' }
+                    })
+                };
+            }
             const [cards, total] = await Promise.all([
                 prisma.card.findMany({
                     where,
@@ -49,18 +74,31 @@ class StockController {
                     take: Number(limit),
                     include: {
                         checkpoint: true,
-                        movements: {
-                            orderBy: { createdAt: 'desc' },
-                            take: 3
-                        }
+                        uploadBatch: true
                     },
                     orderBy: { createdAt: 'desc' }
                 }),
                 prisma.card.count({ where })
             ]);
+            const [totalUpload, totalSold, totalAvailable] = await Promise.all([
+                prisma.card.count(),
+                prisma.card.count({ where: {
+                        status: "SOLD"
+                    } }),
+                prisma.card.count({ where: {
+                        status: "VERIFIED"
+                    } })
+            ]);
             res.status(200).json({
                 message: 'Cards retrieved successfully',
-                data: cards,
+                data: {
+                    cards,
+                    amount: {
+                        upload: totalUpload,
+                        sold: totalSold,
+                        available: totalAvailable
+                    }
+                },
                 pagination: {
                     page: Number(page),
                     limit: Number(limit),
@@ -228,18 +266,27 @@ class StockController {
     }
     static async validateCard(req, res, next) {
         try {
-            const { key } = req.params;
+            const { key, status } = req.params;
+            const rawStatus = Array.isArray(status) ? status[0] : status;
             const card = await prisma.$transaction(async (tx) => {
                 if (!req.user) {
                     throw new Error('User not found');
                 }
+                if (!rawStatus || rawStatus === "UNVERIFIED") {
+                    throw new Error('Please provide status');
+                }
+                if (!Object.values(ItemStatus).includes(rawStatus)) {
+                    throw new Error('Invalid status');
+                }
+                const nextStatus = rawStatus;
                 const card = await tx.card.update({
                     where: {
                         key: key,
                         status: "UNVERIFIED"
                     },
                     data: {
-                        status: "VERIFIED"
+                        status: nextStatus,
+                        validatedAt: new Date()
                     }
                 });
                 const [stock] = await Promise.all([
