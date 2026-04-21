@@ -4,8 +4,8 @@ WORKDIR /app
 COPY package*.json ./
 COPY prisma ./prisma/
 RUN pnpm install
-RUN npx prisma generate
 COPY . .
+RUN npx prisma generate
 EXPOSE 5000
 RUN pnpm build
 CMD ["sh", "-c", "npx prisma migrate deploy && pnpm start"]
