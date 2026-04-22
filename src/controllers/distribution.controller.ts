@@ -196,7 +196,7 @@ class DistributionController {
   static async updateDistribution(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
-      const { status } = req.body;
+      const { status, scheduledAt } = req.body;
 
       const updatedDistribution = await prisma.$transaction(async (tx) => {
         const user = req.user;
@@ -252,7 +252,8 @@ class DistributionController {
         return tx.distribution.update({
           where: { id: Number(id) },
           data: {
-            status
+            status,
+            scheduledAt: scheduledAt ? new Date(scheduledAt) : null
           },
           include: {
             items: {
@@ -277,7 +278,6 @@ class DistributionController {
     try {
       const { id } = req.params;
       const {
-        userCode,
         longitude,    
         latitude,
         signURL,
@@ -317,7 +317,7 @@ class DistributionController {
         const submittance = await prisma.distributionSubmittance.create({
           data: {
             distributionID: Number(id),
-            userCode,
+            userCode: user.code,
             longitude: longitude ? Number(longitude) : null,
             latitude: latitude ? Number(latitude) : null,
             signURL: signURL || null,
