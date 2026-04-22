@@ -228,10 +228,6 @@ class DistributionController {
           throw new Error('Distribution not found');
         }
 
-        if (distribution.status === "DELIVERED") {
-          throw new Error('Distribution is final and cannot be updated');
-        }
-
         if (distribution.items.length === 0) {
           throw new Error('Distribution has no items');
         }
@@ -239,63 +235,7 @@ class DistributionController {
         const itemKeys = distribution.items.map(item => item.itemKey);
 
         if (status === "DELIVERED") {
-          const [sourceStock, targetStock] = await Promise.all([
-            tx.cardStock.findFirst({
-              where: {
-                checkpointCode: distribution.sourceCode
-              },
-              orderBy: {
-                createdAt: 'desc'
-              }
-            }),
-            tx.cardStock.findFirst({
-              where: {
-                checkpointCode: distribution.targetCode
-              },
-              orderBy: {
-                createdAt: 'desc'
-              }
-            })
-          ]);
-
-          if (!sourceStock || Number(sourceStock.amount) < itemKeys.length) {
-            throw new Error('Insufficient source stock');
-          }
-
-          await Promise.all([
-            tx.card.updateMany({
-              where: {
-                key: {
-                  in: itemKeys
-                }
-              },
-              data: {
-                checkpointCode: distribution.targetCode,
-                status: "VERIFIED"
-              }
-            }),
-            tx.cardStock.create({
-              data: {
-                checkpointCode: distribution.sourceCode,
-                amount: Number(sourceStock.amount) - itemKeys.length
-              }
-            }),
-            tx.cardStock.create({
-              data: {
-                checkpointCode: distribution.targetCode,
-                amount: Number(targetStock?.amount || 0) + itemKeys.length
-              }
-            }),
-            tx.cardMovement.createMany({
-              data: distribution.items.map(item => ({
-                cardID: item.card.id,
-                type: "TRANSFER",
-                userCode: user.code,
-                sourceCode: distribution.sourceCode,
-                targetCode: distribution.targetCode
-              }))
-            })
-          ]);
+          throw new Error("Mark as delivered only through submittance");
         } else {
           await tx.card.updateMany({
             where: {
@@ -312,8 +252,7 @@ class DistributionController {
         return tx.distribution.update({
           where: { id: Number(id) },
           data: {
-            status,
-            ...(status === "DELIVERED" && { completedAt: new Date() })
+            status
           },
           include: {
             items: {
@@ -328,6 +267,143 @@ class DistributionController {
       res.status(200).json({
         message: 'Distribution updated successfully',
         data: updatedDistribution
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async submitDistribution(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      const {
+        userCode,
+        longitude,    
+        latitude,
+        signURL,
+        imageURL,
+        storeURL,
+        recipientURL,
+        note,
+        recipientName
+      } = req.body;
+
+      const submittance = await prisma.$transaction(async (tx) => {
+        const user = req.user;
+        
+        if (!user) {
+          throw new Error('User not found');
+        }
+  
+        const distribution = await prisma.distribution.findUnique({
+          where: { id: Number(id) },
+          include: {
+            items: {
+              include: {
+                card: true
+              }
+            }
+          }
+        });
+  
+        if (!distribution) {
+          throw new Error('Distribution not found');
+        }
+  
+        if (distribution.status === "DELIVERED") {
+          throw new Error('Distribution is already completed');
+        }
+  
+        const submittance = await prisma.distributionSubmittance.create({
+          data: {
+            distributionID: Number(id),
+            userCode,
+            longitude: longitude ? Number(longitude) : null,
+            latitude: latitude ? Number(latitude) : null,
+            signURL: signURL || null,
+            imageURL: imageURL || null,
+            storeURL: storeURL || null,
+            recipientURL: recipientURL || null,
+            note: note || null,
+            recipientName: recipientName || null
+          }
+        });
+  
+        await prisma.distribution.update({
+          where: { id: Number(id) },
+          data: {
+            status: "DELIVERED",
+            completedAt: new Date()
+          }
+        });
+
+        const itemKeys = distribution.items.map(item => item.itemKey);
+  
+        const [sourceStock, targetStock] = await Promise.all([
+          tx.cardStock.findFirst({
+            where: {
+              checkpointCode: distribution.sourceCode
+            },
+            orderBy: {
+              createdAt: 'desc'
+            }
+          }),
+          tx.cardStock.findFirst({
+            where: {
+              checkpointCode: distribution.targetCode
+            },
+            orderBy: {
+              createdAt: 'desc'
+            }
+          })
+        ]);
+
+        if (!sourceStock || Number(sourceStock.amount) < itemKeys.length) {
+          throw new Error('Insufficient source stock');
+        }
+
+        await Promise.all([
+          tx.card.updateMany({
+            where: {
+              key: {
+                in: itemKeys
+              }
+            },
+            data: {
+              checkpointCode: distribution.targetCode,
+              status: "VERIFIED"
+            }
+          }),
+          tx.cardStock.create({
+            data: {
+              checkpointCode: distribution.sourceCode,
+              amount: Number(sourceStock.amount) - itemKeys.length
+            }
+          }),
+          tx.cardStock.create({
+            data: {
+              checkpointCode: distribution.targetCode,
+              amount: Number(targetStock?.amount || 0) + itemKeys.length
+            }
+          }),
+          tx.cardMovement.createMany({
+            data: distribution.items.map(item => ({
+              cardID: item.card.id,
+              type: "TRANSFER",
+              userCode: user.code,
+              sourceCode: distribution.sourceCode,
+              targetCode: distribution.targetCode
+            }))
+          })
+        ]);
+
+        return submittance
+      })
+
+
+      res.status(200).json({
+        message: 'Distribution submitted successfully',
+        data: submittance
       });
     } catch (error) {
       next(error);

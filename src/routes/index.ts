@@ -17,7 +17,7 @@ const router = express.Router();
 // User authentication routes
 router.use('/user', userRouter);
 
-router.use(Auth.authenticate)
+router.use(Auth.authenticate);
 
 // Stock management routes (cards and numbers)
 router.use('/stock', stockRouter);
