@@ -7,7 +7,8 @@
   "scripts": {
     "test": "mocha --exit tests/*",
     "dev": "tsx watch src/server.ts",
-    "start": "tsx server.ts",
+    "dev:nodemon": "nodemon --watch src --ext ts,json --exec tsx server.ts",
+    "start": "tsx --watch server.ts",
     "build": "tsc",
     "postinstall": "prisma generate"
   },

@@ -19,7 +19,7 @@ class OpnameController {
         throw new Error('Opname not found');
       }
 
-      if (opname.status !== "RUNNING") {
+      if (opname.status !== "ONGOING") {
         throw new Error('Opname is not running');
       }
 
@@ -102,7 +102,7 @@ class OpnameController {
         const runningOpname = await tx.opname.findFirst({
           where: {
             checkpointCode: checkpointCode,
-            status: "RUNNING"
+            status: "ONGOING"
           },
           orderBy: {
             createdAt: 'desc'
@@ -145,7 +145,7 @@ class OpnameController {
             batch,
             type: "ICCID",
             checkpointCode,
-            status: "RUNNING",
+            status: "ONGOING",
             userCode: req.user.code
           },
           include: {

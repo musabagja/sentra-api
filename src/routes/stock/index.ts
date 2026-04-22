@@ -14,14 +14,16 @@ router.post('/cards', StockController.createCard);
 // GET /api/stock/cards - Get all cards with pagination and filtering
 router.get('/cards', StockController.getCards);
 
+router.get('/batches', StockController.getBatches);
+
 // GET /api/stock/cards/:id - Get a specific card by ID
-router.get('/cards/:id', StockController.getCard);
+router.get('/cards/:key', StockController.getCard);
 
 // PUT /api/stock/cards/:id - Update a specific card
-router.put('/cards/:id', StockController.updateCard);
+router.put('/cards/:key', StockController.updateCard);
 
 // DELETE /api/stock/cards/:id - Delete a specific card
-router.delete('/cards/:id', StockController.deleteCard);
+router.delete('/cards/:key', StockController.deleteCard);
 
 // POST /api/stock/cards/validate/:key - Validate a card
 router.post('/cards/validate/:key', StockController.validateCard);
@@ -46,7 +48,7 @@ router.put('/numbers/:id', StockController.updateNumber);
 router.delete('/numbers/:id', StockController.deleteNumber);
 
 // POST /api/upload/xlsx - Upload bunch of cards from Excel file
-router.post('/upload/xlsx', upload.single('source'), StockController.uploadExcel);
+router.post('/upload/xlsx', upload('xlsx').single('source'), StockController.uploadExcel);
 
 // POST /api/stock/merge - Merge card and number
 router.post('/merge', StockController.mergeSim);

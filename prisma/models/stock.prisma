@@ -13,6 +13,11 @@ enum ItemStatus {
   UNVERIFIED
 }
 
+enum UploadBatchStatus {
+  ONGOING
+  COMPLETED
+}
+
 enum DistributionStatus {
   DELIVERED
   SCHEDULED
@@ -33,7 +38,7 @@ enum OpnameItemType {
 }
 
 enum OpnameStatus {
-  RUNNING
+  ONGOING
   COMPLETED
   CANCELLED
 }
@@ -65,7 +70,7 @@ model Checkpoint {
 }
 
 model Card {
-  id             Int     @id @default(autoincrement())
+  id             Int        @id @default(autoincrement())
   name           String?
   key            String     @unique
   checkpointCode String
@@ -80,7 +85,7 @@ model Card {
   uploadBatch       UploadBatch        @relation(fields: [batchCode], references: [code])
   movements         CardMovement[]
   distributionItems DistributionItem[]
-  merges            Merge[]
+  merge             Merge?
 
   @@index([batchCode])
   @@index([checkpointCode])
@@ -98,10 +103,10 @@ model Number {
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
 
-  checkpoint Checkpoint?      @relation(fields: [checkpointCode], references: [code])
+  checkpoint Checkpoint?     @relation(fields: [checkpointCode], references: [code])
   uploadBatch UploadBatch    @relation(fields: [batchCode], references: [code])
   movements  NumberMovement[]
-  merges     Merge[]
+  merge      Merge?
 
   @@index([batchCode])
   @@index([checkpointCode])
@@ -119,10 +124,23 @@ model UploadBatch {
   userCode  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  status    UploadBatchStatus @default(ONGOING)
+  total     Int      @default(0)
 
-  user User @relation(fields: [userCode], references: [code])
-  cards   Card[]
-  numbers Number[]
+  user     User                @relation(fields: [userCode], references: [code])
+  cards    Card[]
+  numbers  Number[]
+  progress UploadBatchProgress[]
+}
+
+model UploadBatchProgress {
+  id        Int      @id @default(autoincrement())
+  batchCode String
+  progress  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  batch UploadBatch @relation(fields: [batchCode], references: [code])
 }
 
 //
@@ -213,6 +231,26 @@ model Distribution {
   createdAt  DateTime           @default(now())
 
   items DistributionItem[]
+  submittance DistributionSubmittance? @relation("DistributionSubmittance")
+}
+
+model DistributionSubmittance {
+  id         Int         @id @default(autoincrement())
+  distributionID Int     @unique
+  userCode   String
+  longitude  Float?
+  latitude   Float?
+  signURL    String?
+  imageURL   String?
+  storeURL   String?
+  note       String?
+  recipientName String?
+  recipientURL String?
+  createdAt  DateTime           @default(now())
+
+  distribution Distribution @relation("DistributionSubmittance", fields: [distributionID], references: [id])
+
+  @@index([distributionID])
 }
 
 model DistributionItem {

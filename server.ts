@@ -18,6 +18,10 @@ const allowedOrigins = (process.env.CORS_ORIGINS || "")
   .filter(Boolean);
 const corsMode = process.env.CORS_MODE || (isProduction ? "strict" : "reflect");
 
+app.use((req, res, next) => {
+  res.setHeader('ngrok-skip-browser-warning', 'true')
+  next()
+})
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cors({

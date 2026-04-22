@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
 import * as xlsx from 'xlsx';
-import { ItemStatus } from '../../generated/prisma/enums';
+import { ItemStatus, UploadBatchStatus } from '../../generated/prisma/enums';
 
 class StockController {
   // ============================================================================
@@ -34,6 +34,52 @@ class StockController {
     }
   }
 
+  static async getBatches(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { page = 1, limit = 10, status } = req.query;
+
+      const allowedStatus = ['ONGOING', 'COMPLETED'];
+
+      if (status && !allowedStatus.includes(status as string)) {
+        throw new Error('Invalid status');
+      } 
+
+      const where: any = {};
+      if (status) {
+        where.status = status as UploadBatchStatus;
+      }
+
+      const batches = await prisma.uploadBatch.findMany({
+        take: Number(limit),
+        skip: (Number(page) - 1) * Number(limit),
+        where,
+        orderBy: {
+          createdAt: 'desc'
+        }
+      });
+
+      const totalBatch = await prisma.uploadBatch.count({
+        where
+      });
+
+      res.status(200).json({
+        message: 'Cards retrieved successfully',
+        data: {
+          batches,
+          total: totalBatch
+        },
+        pagination: {
+          page: Number(page),
+          limit: Number(limit),
+          total: Number(totalBatch),
+          pages: Math.ceil(Number(totalBatch) / Number(limit))
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async getCards(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, status, search, uploadAt, batch, validatedAt } = req.query;
@@ -49,14 +95,10 @@ class StockController {
       }
       // validatedAt filter (related via Card -> Merge)
       if (validatedAt) {
-        where.merges = {
-          some: {
-            validatedAt: {
-              gte: new Date(`${validatedAt}T00:00:00.000Z`),
-              lt: new Date(`${validatedAt}T23:59:59.999Z`)
-            }
-          }
-        };
+        where.validatedAt = {
+          gte: new Date(`${validatedAt}T00:00:00.000Z`),
+          lt: new Date(`${validatedAt}T23:59:59.999Z`)
+        }
       }
       if (uploadAt || batch) {
         where.uploadBatch = {
@@ -65,7 +107,7 @@ class StockController {
               gte: new Date(`${uploadAt}T00:00:00.000Z`),
               lt: new Date(`${uploadAt}T23:59:59.999Z`)
             }
-          }),
+          }),     
           ...(batch && {
             code: { contains: batch as string, mode: 'insensitive' }
           })
@@ -120,16 +162,15 @@ class StockController {
 
   static async getCard(req: Request, res: Response, next: NextFunction) {
     try {
-      const { id } = req.params;
+      const { key } = req.params;
+
+      console.log({ key });
 
       const card = await prisma.card.findUnique({
-        where: { id: Number(id) },
+        where: { key: key as string },
         include: {
           checkpoint: true,
           movements: {
-            include: {
-              card: true
-            },
             orderBy: { createdAt: 'desc' }
           }
         }
@@ -141,7 +182,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Card retrieved successfully',
-        data: card
+        data: {card}
       });
     } catch (error) {
       next(error);
@@ -235,13 +276,6 @@ class StockController {
 
       const batchCode = lastBatch ? `UP${lastBatch.id + 1}` : `UP1`;
 
-      const batch = await prisma.uploadBatch.create({
-        data: {
-          code: batchCode,
-          userCode: req.user.code
-        }
-      });
-
       // Extract number data from the Excel file with batchCode
       const jsonData = jsonResult.map(each => ({
         sheet: each.sheet,
@@ -249,7 +283,7 @@ class StockController {
           key: String(row.KEY || row.key),
           checkpointCode: (row.CHECKPOINT || row.checkpoint) ? String(row.CHECKPOINT || row.checkpoint) : null,
           remark: row.REMARK || row.remark || '',
-          batchCode: batch.code
+          batchCode: batchCode
         })).filter((item: any) => item.key)
       }))
 
@@ -269,6 +303,15 @@ class StockController {
           }
         })
       )
+
+      const batch = await prisma.uploadBatch.create({
+        data: {
+          code: batchCode,
+          userCode: req.user.code,
+          status: "ONGOING",
+          total: jsonData.find(each => each.sheet === 'ICCID')?.data.length || 0
+        }
+      });
 
       const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
 
@@ -295,7 +338,8 @@ class StockController {
 
   static async validateCard(req: Request, res: Response, next: NextFunction) {
     try {
-      const { key, status } = req.params;
+      const { key } = req.params;
+      const { status } = req.body;
       const rawStatus = Array.isArray(status) ? status[0] : status;
 
       const card = await prisma.$transaction(async (tx) => {
@@ -304,7 +348,7 @@ class StockController {
         }
 
         if (!rawStatus || rawStatus === "UNVERIFIED") {
-          throw new Error ('Please provide status');
+          throw new Error ("Please provide status, wether it's VERIFIED or BROKEN");
         }
 
         if (!(Object.values(ItemStatus) as string[]).includes(rawStatus)) {
@@ -312,18 +356,46 @@ class StockController {
         }
 
         const nextStatus = rawStatus as ItemStatus;
-  
-        const card = await tx.card.update({
+        let updateData: any = {
+          status: nextStatus
+        };
+
+        const card = await tx.card.findFirst({
           where: {
-            key: key as string,
-            status: "UNVERIFIED"
+            key: key as string
           },
-          data: {
-            status: nextStatus,
-            validatedAt: new Date()
+          include: {
+            uploadBatch: true
           }
         });
+
+        if (!card) {
+          throw new Error('Card not found');
+        }
+
+        if (!card.uploadBatch) {
+          throw new Error('Card upload batch not found');
+        }
+
+        if (card.uploadBatch.status === "COMPLETED") {
+          throw new Error('Card upload batch is already completed');
+        }
+
+        if (card.status === "UNVERIFIED") {
+          updateData.validatedAt = new Date();
+        }
   
+        const cards = await tx.card.updateMany({
+          where: {
+            key: key as string
+          },
+          data: updateData
+        });
+
+        if (cards.count === 0) {
+          throw new Error('Card already validated');
+        }
+
         const [stock] = await Promise.all([
           tx.cardStock.findFirst({
             where: {
@@ -332,26 +404,51 @@ class StockController {
             orderBy: {
               createdAt: 'desc'
             }
-          }),
-          tx.cardMovement.create({
-            data: {
-              cardID: card.id,
-              type: "INITIAL",
-              userCode: req.user.code,
-              sourceCode: null,
-              targetCode: card.checkpointCode
-            }
           })
         ])
-  
-        await tx.cardStock.create({
-          data: {
-            checkpointCode: card.checkpointCode,
-            amount: Number(stock?.amount || 0) + 1  
-          }
-        });
-      })
 
+        if (card.status === "UNVERIFIED" || card.status === "BROKEN") {
+          if (nextStatus === "VERIFIED") {
+            await tx.cardMovement.create({
+              data: {
+                cardID: card.id,
+                type: "INITIAL",
+                userCode: req.user.code,
+                sourceCode: null,
+                targetCode: card.checkpointCode
+              }
+            })
+      
+            await tx.cardStock.create({
+              data: {
+                checkpointCode: card.checkpointCode,
+                amount: Number(stock?.amount || 0) + 1
+              }
+            });
+          }
+        } else if (card.status === "VERIFIED") {
+          if (nextStatus === "UNVERIFIED" || nextStatus === "BROKEN") {
+            await tx.cardMovement.create({
+              data: {
+                cardID: card.id,
+                type: "ADJUSTMENT",
+                userCode: req.user.code,
+                sourceCode: card.checkpointCode,
+                targetCode: null
+              }
+            })
+    
+            await tx.cardStock.create({
+              data: {
+                checkpointCode: card.checkpointCode,
+                amount: Number(stock?.amount || 0) - 1
+              }
+            });
+          }
+        } else {
+          throw new Error('Invalid status');
+        }
+      })
 
       res.status(200).json({
         message: 'Card validated successfully',
@@ -503,7 +600,7 @@ class StockController {
 
   static async getNumbers(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, checkpointCode, status, search } = req.query;
+      const { page = 1, limit = 10, checkpointCode, status, search, remark, sort } = req.query;
 
       const where: any = {};
       if (checkpointCode) where.checkpointCode = checkpointCode;
@@ -514,6 +611,16 @@ class StockController {
           { name: { contains: search as string, mode: 'insensitive' } }
         ];
       }
+      if (remark) {
+        where.remark = {
+          contains: remark as string, mode: 'insensitive'
+        }
+      }
+      if (sort) {
+        if (sort !== "ASC"  && sort !== "DESC") {
+          throw new Error ("Sort field can only be filled with 'ASC' or 'DESC'")
+        }
+      }
 
       const [numbers, total] = await Promise.all([
         prisma.number.findMany({
@@ -522,19 +629,31 @@ class StockController {
           take: Number(limit),
           include: {
             checkpoint: true,
-            movements: {
-              orderBy: { createdAt: 'desc' },
-              take: 3
-            }
+            merge: true
           },
           orderBy: { createdAt: 'desc' }
         }),
         prisma.number.count({ where })
       ]);
 
+      const [totalUpload, totalAvailable] = await Promise.all([
+        prisma.number.count(),
+        prisma.number.count({
+          where: {
+            status: "VERIFIED"
+          }
+        })
+      ])
+
       res.status(200).json({
         message: 'Numbers retrieved successfully',
-        data: numbers,
+        data: {
+          numbers,
+          amount: {
+            upload: totalUpload,
+            available: totalAvailable
+          }
+        },
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -549,10 +668,10 @@ class StockController {
 
   static async getNumber(req: Request, res: Response, next: NextFunction) {
     try {
-      const { id } = req.params;
+      const { key } = req.params;
 
       const number = await prisma.number.findUnique({
-        where: { id: Number(id) },
+        where: { key: key as string },
         include: {
           checkpoint: true,
           movements: {
@@ -579,11 +698,11 @@ class StockController {
 
   static async updateNumber(req: Request, res: Response, next: NextFunction) {
     try {
-      const { id } = req.params;
+      const { key } = req.params;
       const { name, status, remark } = req.body;
 
       const number = await prisma.number.update({
-        where: { id: Number(id) },
+        where: { key: key as string },
         data: {
           ...(name !== undefined && { name }),
           ...(status && { status }),
@@ -605,10 +724,10 @@ class StockController {
 
   static async deleteNumber(req: Request, res: Response, next: NextFunction) {
     try {
-      const { id } = req.params;
+      const { key } = req.params;
 
       await prisma.number.delete({
-        where: { id: Number(id) }
+        where: { key: key as string }
       });
 
       res.status(200).json({
