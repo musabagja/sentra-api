@@ -61,18 +61,22 @@ const upload = (type: 'xlsx' | 'image') => multer({
 // Middleware to generate URLs for uploaded images and attach to req.body
 export const generateImageURLs = (req: Request, res: any, next: any) => {
   const files = req.files as { [fieldname: string]: Express.Multer.File[] };
-  
+
   if (files) {
     Object.keys(files).forEach(fieldname => {
       const fileArray = files[fieldname];
       if (fileArray && fileArray.length > 0) {
         const file = fileArray[0];
         if (file) {
-          // Generate URL for the uploaded file
-          // TODO: Replace with actual cloud storage upload (AWS S3, Cloudinary, etc.)
           const url = `/uploads/${file.originalname}`;
-          // Attach URL to req.body as fieldnameURL
-          (req.body as any)[`${fieldname}URL`] = url;
+
+          // Strip "File" suffix and replace with "URL"
+          // imageFile -> imageURL, signFile -> signURL, avatarFile -> avatarURL
+          const urlKey = fieldname.endsWith("File")
+            ? `${fieldname.slice(0, -4)}URL`
+            : `${fieldname}URL`;
+
+          (req.body as any)[urlKey] = url;
         }
       }
     });

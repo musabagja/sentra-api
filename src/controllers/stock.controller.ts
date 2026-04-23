@@ -34,9 +34,35 @@ class StockController {
     }
   }
 
+  static async getBatch(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+
+      const batch = await prisma.uploadBatch.findUnique({
+        where: { id: Number(id) },
+        include: {
+          cards: true,
+          numbers: true,
+          progress: true
+        }
+      });
+
+      if (!batch) {
+        throw new Error('Batch not found');
+      }
+
+      res.status(200).json({
+        message: 'Batch retrieved successfully',
+        data: batch
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async getBatches(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, status } = req.query;
+      const { page = 1, limit = 10, status, batch } = req.query;
 
       const allowedStatus = ['ONGOING', 'COMPLETED'];
 
@@ -48,6 +74,9 @@ class StockController {
       if (status) {
         where.status = status as UploadBatchStatus;
       }
+      if (batch) {
+        where.batchCode = batch as string;
+      }
 
       const batches = await prisma.uploadBatch.findMany({
         take: Number(limit),
@@ -55,6 +84,14 @@ class StockController {
         where,
         orderBy: {
           createdAt: 'desc'
+        },
+        include: {
+          progress: {
+            take: 1,
+            orderBy: {
+              createdAt: 'desc'
+            }
+          }
         }
       });
 
@@ -287,9 +324,19 @@ class StockController {
         })).filter((item: any) => item.key)
       }))
 
+      const batch = await prisma.uploadBatch.create({
+        data: {
+          code: batchCode,
+          userCode: req.user.code,
+          status: "ONGOING",
+          total: jsonData.find(each => each.sheet === 'ICCID')?.data.length || 0
+        }
+      });
+
       // Bulk create cards and numbers with batchCode
       const result = await Promise.all(
         jsonData.map(each => {
+          console.log(each, 'PAYLOAD')
           if (each.sheet === 'ICCID') {
             return prisma.card.createMany({
               data: each.data,
@@ -303,15 +350,6 @@ class StockController {
           }
         })
       )
-
-      const batch = await prisma.uploadBatch.create({
-        data: {
-          code: batchCode,
-          userCode: req.user.code,
-          status: "ONGOING",
-          total: jsonData.find(each => each.sheet === 'ICCID')?.data.length || 0
-        }
-      });
 
       const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
 
@@ -396,10 +434,18 @@ class StockController {
           throw new Error('Card already validated');
         }
 
-        const [stock] = await Promise.all([
+        const [stock, lastProgress] = await Promise.all([
           tx.cardStock.findFirst({
             where: {
               checkpointCode: card.checkpointCode
+            },
+            orderBy: {
+              createdAt: 'desc'
+            }
+          }),
+          tx.uploadBatchProgress.findFirst({
+            where: {
+              batchCode: card.uploadBatch.code
             },
             orderBy: {
               createdAt: 'desc'
@@ -408,42 +454,52 @@ class StockController {
         ])
 
         if (card.status === "UNVERIFIED" || card.status === "BROKEN") {
-          if (nextStatus === "VERIFIED") {
-            await tx.cardMovement.create({
+          if (card.status === "UNVERIFIED") {
+            await tx.uploadBatchProgress.create({
               data: {
-                cardID: card.id,
-                type: "INITIAL",
-                userCode: req.user.code,
-                sourceCode: null,
-                targetCode: card.checkpointCode
+                batchCode: card.uploadBatch.code,
+                progress: (lastProgress?.progress || 0) + 1
               }
             })
-      
-            await tx.cardStock.create({
-              data: {
-                checkpointCode: card.checkpointCode,
-                amount: Number(stock?.amount || 0) + 1
-              }
-            });
+          }
+          if (nextStatus === "VERIFIED") {
+            await Promise.all([
+              tx.cardMovement.create({
+                data: {
+                  cardID: card.id,
+                  type: "INITIAL",
+                  userCode: req.user.code,
+                  sourceCode: null,
+                  targetCode: card.checkpointCode
+                }
+              }),
+              tx.cardStock.create({
+                data: {
+                  checkpointCode: card.checkpointCode,
+                  amount: Number(stock?.amount || 0) + 1
+                }
+              })
+            ])
           }
         } else if (card.status === "VERIFIED") {
           if (nextStatus === "UNVERIFIED" || nextStatus === "BROKEN") {
-            await tx.cardMovement.create({
-              data: {
-                cardID: card.id,
-                type: "ADJUSTMENT",
-                userCode: req.user.code,
-                sourceCode: card.checkpointCode,
-                targetCode: null
-              }
-            })
-    
-            await tx.cardStock.create({
-              data: {
-                checkpointCode: card.checkpointCode,
-                amount: Number(stock?.amount || 0) - 1
-              }
-            });
+            await Promise.all([
+              tx.cardMovement.create({
+                data: {
+                  cardID: card.id,
+                  type: "ADJUSTMENT",
+                  userCode: req.user.code,
+                  sourceCode: card.checkpointCode,
+                  targetCode: null
+                }
+              }),
+              tx.cardStock.create({
+                data: {
+                  checkpointCode: card.checkpointCode,
+                  amount: Number(stock?.amount || 0) - 1
+                }
+              })
+            ])
           }
         } else {
           throw new Error('Invalid status');
