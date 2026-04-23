@@ -143,7 +143,9 @@ class DistributionController {
               select: {
                 items: true
               }
-            }
+            },
+            source: true,
+            target: true
           },
           orderBy: { createdAt: 'desc' }
         }),
@@ -176,7 +178,10 @@ class DistributionController {
             include: {
               card: true
             }
-          }
+          },
+          submittance: true,
+          source: true,
+          target: true
         }
       });
 

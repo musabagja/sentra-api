@@ -67,6 +67,8 @@ model Checkpoint {
   cardMovementsAsTarget  CardMovement[]  @relation("CardMovementTarget")
   numberMovementsAsSource NumberMovement[] @relation("NumberMovementSource")
   numberMovementsAsTarget NumberMovement[] @relation("NumberMovementTarget")
+  distributionsAsSource Distribution[] @relation("DistributionSource")
+  distributionsAsTarget Distribution[] @relation("DistributionTarget")
 }
 
 model Card {
@@ -232,6 +234,8 @@ model Distribution {
 
   items DistributionItem[]
   submittance DistributionSubmittance? @relation("DistributionSubmittance")
+  source Checkpoint @relation(name: "DistributionSource", fields: [sourceCode], references: [code])
+  target Checkpoint @relation(name: "DistributionTarget", fields: [targetCode], references: [code])
 }
 
 model DistributionSubmittance {

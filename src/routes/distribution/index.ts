@@ -20,10 +20,10 @@ router.get('/:id', DistributionController.getDistribution);
 router.put('/:id', DistributionController.updateDistribution);
 
 router.put('/submit/:id', upload('image').fields([
-  { name: 'sign', maxCount: 1 },
-  { name: 'image', maxCount: 1 },
-  { name: 'store', maxCount: 1 },
-  { name: 'recipient', maxCount: 1 }
+  { name: 'signFile', maxCount: 1 },
+  { name: 'imageFile', maxCount: 1 },
+  { name: 'storeFile', maxCount: 1 },
+  { name: 'recipientFile', maxCount: 1 }
 ]), generateImageURLs, DistributionController.submitDistribution);
 
 // DELETE /api/distribution/:id - Delete a specific distribution
