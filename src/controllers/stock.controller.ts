@@ -146,6 +146,7 @@ class StockController {
   static async completeBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
+      const { note } = req.body;
 
       const batch = await prisma.$transaction(async (tx) => {
         await tx.card.updateMany({
@@ -163,7 +164,8 @@ class StockController {
             id: Number(id)
           },
           data: {
-            status: 'COMPLETED'
+            status: 'COMPLETED',
+            note
           }
         });
       })
