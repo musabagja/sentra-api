@@ -143,6 +143,40 @@ class StockController {
     }
   }
 
+  static async completeBatch(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+
+      const batch = await prisma.$transaction(async (tx) => {
+        await tx.card.updateMany({
+          where: {
+            batchCode: batch.code,
+            status: "UNVERIFIED"
+          },
+          data: {
+            status: "LOST"
+          }
+        });
+        
+        return await tx.uploadBatch.update({
+          where: {
+            id: Number(id)
+          },
+          data: {
+            status: 'COMPLETED'
+          }
+        });
+      })
+
+      res.status(200).json({
+        message: 'Batch updated successfully',
+        data: batch
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async getCards(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, status, search, uploadAt, batch, validatedAt } = req.query;
