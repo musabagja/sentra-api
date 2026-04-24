@@ -149,9 +149,19 @@ class StockController {
       const { note } = req.body;
 
       const batch = await prisma.$transaction(async (tx) => {
+        const currentBatch = await tx.uploadBatch.findUnique({
+          where: {
+            id: Number(id)
+          }
+        });
+
+        if (!currentBatch) {
+          throw new Error('Batch not found');
+        }
+        
         await tx.card.updateMany({
           where: {
-            batchCode: batch.code,
+            batchCode: currentBatch.code,
             status: "UNVERIFIED"
           },
           data: {
