@@ -112,12 +112,28 @@ class StockController {
       const totalBatch = await prisma.uploadBatch.count({
         where
       });
+      const totalCards = await prisma.card.count({
+        where
+      });
+      const totalVerified = await prisma.card.count({
+        where: {
+          status: {
+            not: "UNVERIFIED"
+          }
+        }
+      });
+      const totalUnverified = totalCards - totalVerified;
 
       res.status(200).json({
         message: 'Cards retrieved successfully',
         data: {
           batches,
-          total: totalBatch
+          amount: {
+            totalBatch,
+            totalCards,
+            totalVerified,
+            totalUnverified
+          }
         },
         pagination: {
           page: Number(page),
