@@ -451,6 +451,7 @@ class StockController {
           throw new Error ("Please provide status, wether it's VERIFIED or BROKEN");
         }
 
+        console.log("masuk sini")
         if (!(Object.values(ItemStatus) as string[]).includes(rawStatus)) {
           throw new Error('Invalid status');
         }
@@ -515,7 +516,7 @@ class StockController {
           })
         ])
 
-        if (card.status === "UNVERIFIED" || card.status === "BROKEN") {
+        if (card.status === "UNVERIFIED" || card.status === "BROKEN" || card.status === "LOST") {
           if (card.status === "UNVERIFIED") {
             await tx.uploadBatchProgress.create({
               data: {
@@ -544,7 +545,7 @@ class StockController {
             ])
           }
         } else if (card.status === "VERIFIED") {
-          if (nextStatus === "UNVERIFIED" || nextStatus === "BROKEN") {
+          if (nextStatus === "UNVERIFIED" || nextStatus === "BROKEN" || nextStatus === "LOST") {
             await Promise.all([
               tx.cardMovement.create({
                 data: {
