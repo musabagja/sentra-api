@@ -62,7 +62,7 @@ class StockController {
 
   static async getBatches(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, status, batch } = req.query;
+      const { page = 1, limit = 10, status, search } = req.query;
 
       const allowedStatus = ['ONGOING', 'COMPLETED'];
 
@@ -74,8 +74,22 @@ class StockController {
       if (status) {
         where.status = status as UploadBatchStatus;
       }
-      if (batch) {
-        where.batchCode = batch as string;
+
+      if (search) {
+        where.OR = [
+          {
+            code: {
+              contains: search as string,
+              mode: 'insensitive'
+            }
+          },
+          {
+            name: {
+              contains: search as string,
+              mode: 'insensitive'
+            }
+          }
+        ]
       }
 
       const batches = await prisma.uploadBatch.findMany({
