@@ -451,7 +451,6 @@ class StockController {
           throw new Error ("Please provide status, wether it's VERIFIED or BROKEN");
         }
 
-        console.log("masuk sini")
         if (!(Object.values(ItemStatus) as string[]).includes(rawStatus)) {
           throw new Error('Invalid status');
         }
