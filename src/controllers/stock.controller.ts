@@ -109,12 +109,8 @@ class StockController {
         }
       });
 
-      const totalBatch = await prisma.uploadBatch.count({
-        where
-      });
-      const totalCards = await prisma.card.count({
-        where
-      });
+      const totalBatch = await prisma.uploadBatch.count();
+      const totalCards = await prisma.card.count();
       const totalVerified = await prisma.card.count({
         where: {
           status: {
