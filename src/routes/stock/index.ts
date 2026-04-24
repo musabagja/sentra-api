@@ -18,6 +18,8 @@ router.get('/batches', StockController.getBatches);
 
 router.get('/batches/:id', StockController.getBatch);
 
+router.put('/batches/close/:id', StockController.completeBatch);
+
 // GET /api/stock/cards/:id - Get a specific card by ID
 router.get('/cards/:key', StockController.getCard);
 
