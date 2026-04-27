@@ -4,35 +4,6 @@ import * as xlsx from 'xlsx';
 import { ItemStatus, UploadBatchStatus } from '../../generated/prisma/enums';
 
 class StockController {
-  // ============================================================================
-  // CARD CRUD OPERATIONS
-  // ============================================================================
-
-  static async createCard(req: Request, res: Response, next: NextFunction) {
-    try {
-      // const { name, key, checkpointCode, status, remark } = req.body;
-
-      // const card = await prisma.card.create({
-      //   data: {
-      //     name,
-      //     key,
-      //     checkpointCode,
-      //     status: status || 'VERIFIED',
-      //     remark
-      //   },
-      //   include: {
-      //     checkpoint: true
-      //   }
-      // });
-
-      // res.status(201).json({
-      //   message: 'Card created successfully',
-      //   data: card
-      // });
-    } catch (error) {
-      next(error);
-    }
-  }
 
   static async getBatch(req: Request, res: Response, next: NextFunction) {
     try {
@@ -185,6 +156,7 @@ class StockController {
         data: batch
       });
     } catch (error) {
+      (error as any).status = 400;
       next(error);
     }
   }
@@ -273,8 +245,6 @@ class StockController {
     try {
       const { key } = req.params;
 
-      console.log({ key });
-
       const card = await prisma.card.findUnique({
         where: { key: key as string },
         include: {
@@ -292,32 +262,6 @@ class StockController {
       res.status(200).json({
         message: 'Card retrieved successfully',
         data: {card}
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  static async updateCard(req: Request, res: Response, next: NextFunction) {
-    try {
-      const { id } = req.params;
-      const { name, status, remark } = req.body;
-
-      const card = await prisma.card.update({
-        where: { id: Number(id) },
-        data: {
-          ...(name !== undefined && { name }),
-          ...(status && { status }),
-          ...(remark !== undefined && { remark })
-        },
-        include: {
-          checkpoint: true
-        }
-      });
-
-      res.status(200).json({
-        message: 'Card updated successfully',
-        data: card
       });
     } catch (error) {
       next(error);
@@ -408,7 +352,6 @@ class StockController {
       // Bulk create cards and numbers with batchCode
       const result = await Promise.all(
         jsonData.map(each => {
-          console.log(each, 'PAYLOAD')
           if (each.sheet === 'ICCID') {
             return prisma.card.createMany({
               data: each.data,
@@ -441,6 +384,14 @@ class StockController {
           created: totalCreated
         }
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async downloadExcel(req: Request, res: Response, next: NextFunction) {
+    try {
+      
     } catch (error) {
       next(error);
     }
@@ -589,13 +540,28 @@ class StockController {
 
   static async mergeSim(req: Request, res: Response, next: NextFunction) {
     try {
-      const { cardKey, numberKey } = req.body;
+      const { cardKey, numberKey, checkpointCode, type, trn } = req.body;
 
       const sim = await prisma.$transaction(async (tx) => {
         if (!req.user) {
           throw new Error('User not found');
         }
-        const [card, number] = await Promise.all([
+        if (!type) {
+          throw new Error('Type is required');
+        }
+        if (type === "SIMCARD" && !cardKey) {
+          throw new Error('ICCID is required for SIMCARD type');
+        }
+        if (!checkpointCode) {
+          throw new Error('Checkpoint code is required');
+        }
+        if (!trn) {
+          throw new Error('TRN is required');
+        }
+        if (!req.user) {
+          throw new Error('User not found');
+        }
+        const [card, number, checkpoint] = await Promise.all([
           tx.card.findUnique({
             where: {
               key: cardKey,
@@ -606,6 +572,11 @@ class StockController {
             where: {
               key: numberKey,
               status: "VERIFIED"
+            }
+          }),
+          tx.checkpoint.findUnique({
+            where: {
+              code: checkpointCode
             }
           }),
           tx.card.update({
@@ -625,20 +596,42 @@ class StockController {
             }
           })
         ]);
-  
+
         if (!card) {
           throw new Error('Card not found');
+        }
+
+        if (!checkpoint) {
+          throw new Error('Checkpoint not found');
+        }
+
+        if (checkpoint.code !== card?.checkpointCode) {
+          throw new Error('Checkpoint code does not match card checkpoint code');
         }
   
         if (!number) {
           throw new Error('Number not found');
         }
+
+        if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
+          throw new Error('Number checkpoint code does not match checkpoint code');
+        }
+
+        let esimCode = "";
+
+        if (type === "ESIM") {
+          esimCode = "ESIM-" + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+        }
   
         const [sim, stock] = await Promise.all([
           tx.merge.create({
             data: {
-              cardKey,
+              cardKey: type === "ESIM" ? esimCode : cardKey,
               numberKey,
+              type,
+              checkpointCode,
+              userCode: req.user.code,
+              TRN: trn,
               soldAt: new Date()
             }
           }),
@@ -656,32 +649,12 @@ class StockController {
           throw new Error('Card unavailable');
         }
   
-        await Promise.all([
-          tx.cardStock.create({
-            data: {
-              checkpointCode: card.checkpointCode,
-              amount: Number(stock.amount) - 1  
-            }
-          }),
-          tx.cardMovement.create({
-            data: {
-              cardID: card.id,
-              type: 'SALE',
-              userCode: req.user.code,
-              sourceCode: card.checkpointCode,
-              targetCode: null
-            }
-          }),
-          tx.numberMovement.create({
-            data: {
-              numberID: number.id,
-              type: 'SALE',
-              userCode: req.user.code,
-              sourceCode: number.checkpointCode,
-              targetCode: null
-            }
-          })
-        ])
+        await tx.cardStock.create({
+          data: {
+            checkpointCode: card.checkpointCode,
+            amount: Number(stock.amount) - 1  
+          }
+        })
 
         return sim
       });

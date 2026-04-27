@@ -8,23 +8,17 @@ const router = express.Router();
 // CARD ROUTES
 // ============================================================================
 
-// POST /api/stock/cards - Create a new card
-router.post('/cards', StockController.createCard);
-
-// GET /api/stock/cards - Get all cards with pagination and filtering
-router.get('/cards', StockController.getCards);
-
 router.get('/batches', StockController.getBatches);
 
 router.get('/batches/:id', StockController.getBatch);
 
 router.put('/batches/close/:id', StockController.completeBatch);
 
+// GET /api/stock/cards - Get all cards with pagination and filtering
+router.get('/cards', StockController.getCards);
+
 // GET /api/stock/cards/:id - Get a specific card by ID
 router.get('/cards/:key', StockController.getCard);
-
-// PUT /api/stock/cards/:id - Update a specific card
-router.put('/cards/:key', StockController.updateCard);
 
 // DELETE /api/stock/cards/:id - Delete a specific card
 router.delete('/cards/:key', StockController.deleteCard);

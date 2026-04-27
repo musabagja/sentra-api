@@ -4,6 +4,11 @@ enum CheckpointType {
   HQ
 }
 
+enum MergeType {
+  SIMCARD
+  ESIM
+}
+
 enum ItemStatus {
   VERIFIED
   SOLD
@@ -22,6 +27,7 @@ enum DistributionStatus {
   DELIVERED
   SCHEDULED
   HOLD
+  CANCELLED
 }
 
 enum MovementType {
@@ -30,6 +36,7 @@ enum MovementType {
   SALE
   ADJUSTMENT
   RETURN
+  OPNAME
 }
 
 enum OpnameItemType {
@@ -158,6 +165,10 @@ model Merge {
   verifiedAt DateTime?
   soldAt     DateTime?
   createdAt  DateTime  @default(now())
+  checkpointCode String?
+  userCode   String
+  TRN        String?
+  type       String?   
 
   number Number @relation(fields: [numberKey], references: [key])
   card   Card   @relation(fields: [cardKey], references: [key])
