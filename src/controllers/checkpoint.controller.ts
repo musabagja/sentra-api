@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
+import { Prisma } from '../../generated/prisma/client';
 
 class CheckpointController {
   static async createCheckpoint(req: Request, res: Response, next: NextFunction) {
@@ -25,9 +26,29 @@ class CheckpointController {
 
   static async getCheckpoints(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, type } = req.query;
+      const { page = 1, limit = 10, type, search } = req.query;
 
-      const where = type ? { type: type as any } : {};
+      const where: Prisma.CheckpointWhereInput = {};
+      if (type) {
+        where.type = type as any;
+      }
+
+      if (search) {
+        where.OR = [
+          {
+            code: {
+              contains: search as string,
+              mode: 'insensitive'
+            }
+          },
+          {
+            name: {
+              contains: search as string,
+              mode: 'insensitive'
+            }
+          }
+        ]
+      }
 
       const [checkpoints, total] = await Promise.all([
         prisma.checkpoint.findMany({
@@ -37,8 +58,7 @@ class CheckpointController {
           include: {
             _count: {
               select: {
-                cards: true,
-                numbers: true
+                cards: true
               }
             }
           },
@@ -77,18 +97,9 @@ class CheckpointController {
               }
             }
           },
-          numbers: {
-            include: {
-              movements: {
-                orderBy: { createdAt: 'desc' },
-                take: 5
-              }
-            }
-          },
           _count: {
             select: {
-              cards: true,
-              numbers: true
+              cards: true
             }
           }
         }
@@ -98,9 +109,40 @@ class CheckpointController {
         throw new Error('Checkpoint not found');
       }
 
+      const [totalCard, totalSold, totalVerified] = await Promise.all([
+        prisma.card.count({
+          where: {
+            checkpointCode: checkpoint.code
+          }
+        }),
+        prisma.card.count({
+          where: {
+            checkpointCode: checkpoint.code,
+            status: 'SOLD'
+          }
+        }),
+        prisma.card.count({
+          where: {
+            checkpointCode: checkpoint.code,
+            status: 'VERIFIED'
+          }
+        })
+      ]);
+
+      if (!checkpoint) {
+        throw new Error('Checkpoint not found');
+      }
+
       res.status(200).json({
         message: 'Checkpoint retrieved successfully',
-        data: checkpoint
+        data: {
+          checkpoint,
+          amount: {
+            card: totalCard,
+            sold: totalSold,
+            verified: totalVerified
+          }
+        }
       });
     } catch (error) {
       next(error);

@@ -7,62 +7,100 @@ class OpnameController {
       const { id } = req.params;
       const { status, cardKey } = req.body;
 
-      if (!req.user) {
-        throw new Error('User not found');
-      }
-
-      const opname = await prisma.opname.findUnique({
-        where: { id: Number(id) }
-      });
-
-      if (!opname) {
-        throw new Error('Opname not found');
-      }
-
-      if (opname.status !== "ONGOING") {
-        throw new Error('Opname is not running');
-      }
-
-      const card = await prisma.card.findUnique({
-        where: { key: cardKey }
-      });
-
-      if (!card) {
-        throw new Error('Card not found');
-      }
-
-      if (card.status === "SOLD") {
-        throw new Error('Card is sold');
-      }
-
-      if (card.status === "UNVERIFIED") {
-        throw new Error('Card is not verified');
-      }
-
-      if (card.checkpointCode !== opname.checkpointCode) {
-        throw new Error('Card is not at the same checkpoint as the opname');
-      }
-      const opnameProgresses = await prisma.opnameUpdate.findMany({
-        where: {
-          opnameID: Number(id)
+      const updatedOpname = await prisma.$transaction(async (tx) => {
+        if (!req.user) {
+          throw new Error('User not found');
         }
+  
+        const [opname, card] = await Promise.all([
+          tx.opname.findUnique({
+            where: { id: Number(id) }
+          }),
+          tx.card.findUnique({
+            where: { key: cardKey }
+          })
+        ]);
+  
+        if (!opname) {
+          throw new Error('Opname not found');
+        }
+  
+        if (opname.status !== "ONGOING") {
+          throw new Error('Opname is not running');
+        }
+  
+        if (!card) {
+          throw new Error('Card not found');
+        }
+  
+        if (card.status === "SOLD") {
+          throw new Error('Card is sold');
+        }
+  
+        if (card.status === "UNVERIFIED") {
+          throw new Error('Card is not verified');
+        }
+  
+        if (card.checkpointCode !== opname.checkpointCode) {
+          throw new Error('Card is not at the same checkpoint as the opname');
+        }
+  
+        const [opnameProgresses, cardStock] = await Promise.all([
+          tx.opnameUpdate.findMany({
+            where: {
+              opnameID: Number(id)
+            }
+          }),
+          tx.cardStock.findFirst({
+            where: { checkpointCode: card.checkpointCode },
+            orderBy: { createdAt: 'desc' }
+          })
+        ])
+
+        if (!cardStock) {
+          throw new Error('Card stock not found');
+        }
+
+        if (cardStock.amount <= 0) {
+          throw new Error('Card stock amount is zero');
+        }
+  
+        const totalProgress = [...new Set(opnameProgresses.map(update => update.itemID))];
+  
+        await tx.opnameUpdate.create({
+          data: {
+            itemID: card.id,
+            status: status === "VERIFIED" ? "OK" : status,
+            opnameID: Number(id),
+            userCode: req.user.code
+          }
+        });
+  
+        if (card.status === "VERIFIED") {
+          if (status !== "VERIFIED") {
+            await tx.cardStock.create({
+              data: {
+                amount: cardStock?.amount - 1,
+                checkpointCode: card.checkpointCode
+              }
+            });
+          }
+        } else {
+          if (status === "VERIFIED") {
+            await tx.cardStock.create({
+              data: {
+                amount: cardStock?.amount + 1,
+                checkpointCode: card.checkpointCode
+              }
+            });
+          }
+        }
+
+        return await tx.opname.update({
+          where: { id: Number(id) },
+          data: { progress: totalProgress.length }
+        });
       })
-
-      const totalProgress = [...new Set(opnameProgresses.map(update => update.itemID))];
-
-      const updatedOpname = await prisma.opname.update({
-        where: { id: Number(id) },
-        data: { progress: totalProgress.length }
-      });
-
-      await prisma.opnameUpdate.create({
-        data: {
-          itemID: card.id,
-          status,
-          opnameID: Number(id),
-          userCode: req.user.code
-        }
-      });
 
       res.status(200).json({
         message: 'Opname progress updated successfully',
@@ -159,6 +197,30 @@ class OpnameController {
 
       res.status(201).json({
         message: 'Opname created successfully',
+        data: {
+          opname
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async closeOpname(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+
+      const opname = await prisma.opname.update({
+        where: {
+          id: Number(id)
+        },
+        data: {
+          status: "COMPLETED"
+        }
+      });
+
+      res.status(200).json({
+        message: 'Opname closed successfully',
         data: {
           opname
         }

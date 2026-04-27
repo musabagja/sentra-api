@@ -19,6 +19,8 @@ router.get('/:id', DistributionController.getDistribution);
 // PUT /api/distribution/:id - Update a specific distribution
 router.put('/:id', DistributionController.updateDistribution);
 
+router.put('/cancel/:id', DistributionController.cancelDistribution);
+
 router.put('/submit/:id', upload('image').fields([
   { name: 'signFile', maxCount: 1 },
   { name: 'imageFile', maxCount: 1 },

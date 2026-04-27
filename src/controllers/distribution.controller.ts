@@ -120,12 +120,14 @@ class DistributionController {
 
   static async getDistributions(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, status, sourceCode, targetCode } = req.query;
+      const { page = 1, limit = 10, status, sourceCode, targetCode, startDueDate, endDueDate } = req.query;
 
       const where: any = {};
       if (status) where.status = status;
       if (sourceCode) where.sourceCode = sourceCode;
       if (targetCode) where.targetCode = targetCode;
+      if (startDueDate) where.scheduledAt = { gte: new Date(startDueDate as string) };
+      if (endDueDate) where.scheduledAt = { lte: new Date(endDueDate as string) };
 
       const [distributions, total] = await Promise.all([
         prisma.distribution.findMany({
@@ -273,6 +275,60 @@ class DistributionController {
       res.status(200).json({
         message: 'Distribution updated successfully',
         data: updatedDistribution
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async cancelDistribution(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+
+      const distribution = await prisma.$transaction(async (tx) => {
+        const currentDistribution = await tx.distribution.findUnique({
+          where: { id: Number(id) },
+          include: {
+            items: true
+          }
+        });
+        
+        if (!currentDistribution) {
+          throw new Error('Distribution not found');
+        }
+
+        if (currentDistribution.status === "DELIVERED") {
+          throw new Error('Cannot cancel a delivered distribution');
+        }
+
+        if (currentDistribution.status === "CANCELLED") {
+          throw new Error('Distribution already cancelled');
+        }
+        
+        const updatedDistribution = await tx.distribution.update({
+          where: { id: Number(id) },
+          data: {
+            status: "CANCELLED"
+          }
+        });
+        
+        await tx.card.updateMany({
+          where: {
+            key: {
+              in: currentDistribution.items.map(item => item.itemKey)
+            }
+          },
+          data: {
+            status: "VERIFIED"
+          }
+        });
+
+        return updatedDistribution;
+      })
+
+      res.status(200).json({
+        message: 'Distribution cancelled successfully',
+        data: {distribution}
       });
     } catch (error) {
       next(error);
