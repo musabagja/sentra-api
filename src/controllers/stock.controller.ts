@@ -744,13 +744,34 @@ class StockController {
         })
       ])
 
+      const totalMerge = await prisma.merge.count();
+      const monthlyMerge = await prisma.merge.count({
+        where: {
+          createdAt: {
+            gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+          }
+        }
+      });
+      const dailyMerge = await prisma.merge.count({
+        where: {
+          createdAt: {
+            gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())
+          }
+        }
+      });
+
       res.status(200).json({
         message: 'Numbers retrieved successfully',
         data: {
           numbers,
           amount: {
             upload: totalUpload,
-            available: totalAvailable
+            available: totalAvailable,
+            merge: {
+              total: totalMerge,
+              monthly: monthlyMerge,
+              daily: dailyMerge
+            }
           }
         },
         pagination: {
