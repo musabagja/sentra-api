@@ -50,20 +50,26 @@ class CheckpointController {
         ]
       }
 
-      const [checkpoints, total] = await Promise.all([
-        prisma.checkpoint.findMany({
-          where,
-          skip: (Number(page) - 1) * Number(limit),
-          take: Number(limit),
-          include: {
-            _count: {
-              select: {
-                cards: true
-              }
+      const findManyOptions: any = {
+        where,
+        skip: (Number(page) - 1) * Number(limit),
+        include: {
+          _count: {
+            select: {
+              cards: true,
+              merges: true
             }
-          },
-          orderBy: { createdAt: 'desc' }
-        }),
+          }
+        },
+        orderBy: { createdAt: 'desc' }
+      };
+
+      if (limit) {
+        findManyOptions.take = Number(limit);
+      }
+
+      const [checkpoints, total] = await Promise.all([
+        prisma.checkpoint.findMany(findManyOptions),
         prisma.checkpoint.count({ where })
       ]);
 

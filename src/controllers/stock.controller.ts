@@ -860,12 +860,20 @@ class StockController {
 
   static async getMerges(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10 } = req.query;
+      const { page = 1, limit = 10, checkpointCode } = req.query;
+
+      let where = {}
+      if (checkpointCode) {
+        where = {
+          checkpointCode: checkpointCode as string
+        }
+      }
 
       const merges = await prisma.merge.findMany({
         skip: (Number(page) - 1) * Number(limit),
         take: Number(limit),
-        orderBy: { createdAt: 'desc' }
+        orderBy: { createdAt: 'desc' },
+        where
       });
 
       const total = await prisma.merge.count();
