@@ -159,7 +159,7 @@ model UploadBatchProgress {
 model Merge {
   id         Int    @id @default(autoincrement())
   numberKey  String    @unique
-  cardKey    String
+  cardKey    String    @unique
   remark     String?
   verifiedAt DateTime?
   soldAt     DateTime?
