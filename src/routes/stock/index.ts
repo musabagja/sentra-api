@@ -49,6 +49,8 @@ router.delete('/numbers/:id', StockController.deleteNumber);
 router.post('/upload/xlsx', upload('xlsx').single('source'), StockController.uploadExcel);
 
 // POST /api/stock/merge - Merge card and number
-router.post('/merge', StockController.mergeSim);
+router.post('/merges', StockController.mergeSim);
+
+router.get('/merges', StockController.getMerges);
 
 export default router;

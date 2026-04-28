@@ -561,13 +561,7 @@ class StockController {
         if (!req.user) {
           throw new Error('User not found');
         }
-        const [card, number, checkpoint] = await Promise.all([
-          tx.card.findUnique({
-            where: {
-              key: cardKey,
-              status: "VERIFIED"
-            }
-          }),
+        const [number, checkpoint] = await Promise.all([
           tx.number.findUnique({
             where: {
               key: numberKey,
@@ -579,14 +573,6 @@ class StockController {
               code: checkpointCode
             }
           }),
-          tx.card.update({
-            where: {
-              key: cardKey
-            },
-            data: {
-              status: 'SOLD'
-            }
-          }),
           tx.number.update({
             where: {
               key: numberKey
@@ -596,19 +582,9 @@ class StockController {
             }
           })
         ]);
-
-        if (!card) {
-          throw new Error('Card not found');
-        }
-
         if (!checkpoint) {
           throw new Error('Checkpoint not found');
         }
-
-        if (checkpoint.code !== card?.checkpointCode) {
-          throw new Error('Checkpoint code does not match card checkpoint code');
-        }
-  
         if (!number) {
           throw new Error('Number not found');
         }
@@ -616,15 +592,58 @@ class StockController {
         if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
           throw new Error('Number checkpoint code does not match checkpoint code');
         }
-
+        let card
+        if (type === "SIMCARD") {
+          [card] = await Promise.all([
+            tx.card.findUnique({
+              where: {
+                key: cardKey,
+                status: "VERIFIED"
+              }
+            }),
+            tx.card.update({
+              where: {
+                key: cardKey
+              },
+              data: {
+                status: 'SOLD'
+              }
+            }),
+          ])
+          if (!card) {
+            throw new Error('Card not found');
+          }
+          if (checkpoint.code !== card?.checkpointCode) {
+            throw new Error('Checkpoint code does not match card checkpoint code');
+          }
+          const stock = await tx.cardStock.findFirst({
+            where: {
+              checkpointCode: card.checkpointCode
+            },
+            orderBy: {
+              createdAt: 'desc'
+            }
+          });
+          if (!stock || Number(stock.amount) <= 0) {
+            throw new Error('Card unavailable');
+          }
+          await tx.cardStock.create({
+            data: {
+              checkpointCode: card.checkpointCode,
+              amount: Number(stock.amount) - 1  
+            }
+          })
+        }
+  
         let esimCode = "";
 
         if (type === "ESIM") {
           esimCode = "ESIM-" + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
         }
-  
-        const [sim, stock] = await Promise.all([
-          tx.merge.create({
+
+        console.log(esimCode)
+
+        const sim = await tx.merge.create({
             data: {
               cardKey: type === "ESIM" ? esimCode : cardKey,
               numberKey,
@@ -634,28 +653,7 @@ class StockController {
               TRN: trn,
               soldAt: new Date()
             }
-          }),
-          tx.cardStock.findFirst({
-            where: {
-              checkpointCode: card.checkpointCode
-            },
-            orderBy: {
-              createdAt: 'desc'
-            }
           })
-        ]);
-  
-        if (!stock || Number(stock.amount) <= 0) {
-          throw new Error('Card unavailable');
-        }
-  
-        await tx.cardStock.create({
-          data: {
-            checkpointCode: card.checkpointCode,
-            amount: Number(stock.amount) - 1  
-          }
-        })
-
         return sim
       });
 
@@ -833,6 +831,35 @@ class StockController {
 
       res.status(200).json({
         message: 'Number deleted successfully'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async getMerges(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { page = 1, limit = 10 } = req.query;
+
+      const merges = await prisma.merge.findMany({
+        skip: (Number(page) - 1) * Number(limit),
+        take: Number(limit),
+        orderBy: { createdAt: 'desc' }
+      });
+
+      const total = await prisma.merge.count();
+
+      res.status(200).json({
+        message: 'Merges retrieved successfully',
+        data: {
+          merges,
+          pagination: {
+            page: Number(page),
+            limit: Number(limit),
+            total,
+            pages: Math.ceil(total / Number(limit))
+          }
+        }
       });
     } catch (error) {
       next(error);
