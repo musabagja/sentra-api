@@ -94,7 +94,6 @@ model Card {
   uploadBatch       UploadBatch        @relation(fields: [batchCode], references: [code])
   movements         CardMovement[]
   distributionItems DistributionItem[]
-  merge             Merge?
 
   @@index([batchCode])
   @@index([checkpointCode])
@@ -160,7 +159,7 @@ model UploadBatchProgress {
 model Merge {
   id         Int    @id @default(autoincrement())
   numberKey  String    @unique
-  cardKey    String    @unique
+  cardKey    String
   remark     String?
   verifiedAt DateTime?
   soldAt     DateTime?
@@ -171,7 +170,6 @@ model Merge {
   type       String?   
 
   number Number @relation(fields: [numberKey], references: [key])
-  card   Card   @relation(fields: [cardKey], references: [key])
 
   @@index([soldAt])
 }
