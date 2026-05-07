@@ -76,7 +76,8 @@ model Checkpoint {
   numberMovementsAsTarget NumberMovement[] @relation("NumberMovementTarget")
   distributionsAsSource Distribution[] @relation("DistributionSource")
   distributionsAsTarget Distribution[] @relation("DistributionTarget")
-  merges Merge[]
+  merges                Merge[]
+  mergeAdditionals      MergeAdditional[]
 }
 
 model Card {
@@ -95,6 +96,7 @@ model Card {
   uploadBatch       UploadBatch        @relation(fields: [batchCode], references: [code])
   movements         CardMovement[]
   distributionItems DistributionItem[]
+  merge             Merge?
 
   @@index([batchCode])
   @@index([checkpointCode])
@@ -162,15 +164,33 @@ model Merge {
   numberKey  String    @unique
   cardKey    String    @unique
   remark     String?
-  verifiedAt DateTime?
+  checkpointCode String?
+  userCode   String
+  TRN        String?
   soldAt     DateTime?
   createdAt  DateTime  @default(now())
+  verifiedAt DateTime?
+
+  card Card @relation(fields: [cardKey], references: [key])
+  number Number @relation(fields: [numberKey], references: [key])
+  checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code])
+
+  @@index([soldAt])
+}
+
+model MergeAdditional {
+  id         Int    @id @default(autoincrement())
+  numberKey  String    @unique
+  cardKey    String    @unique
+  remark     String?
   checkpointCode String?
   userCode   String
   TRN        String?
   type       String?   
+  soldAt     DateTime?
+  createdAt  DateTime  @default(now())
+  verifiedAt DateTime?
 
-  number Number @relation(fields: [numberKey], references: [key])
   checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code])
 
   @@index([soldAt])

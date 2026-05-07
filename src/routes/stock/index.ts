@@ -53,4 +53,7 @@ router.post('/merges', StockController.mergeSim);
 
 router.get('/merges', StockController.getMerges);
 
+// GET /api/stock/dashboard - Get dashboard data
+router.get('/dashboard', StockController.dashboardSync);
+
 export default router;

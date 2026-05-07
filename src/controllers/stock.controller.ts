@@ -5,6 +5,110 @@ import { ItemStatus, UploadBatchStatus } from '../../generated/prisma/enums';
 
 class StockController {
 
+  static async dashboardSync (req: Request, res: Response, next: NextFunction) {
+    try {
+      const excluded: ItemStatus[] = ["UNVERIFIED", "LOST"]
+      const totalStock = await prisma.card.count({
+        where: {
+          status: {
+            notIn: excluded
+          }
+        }
+      });
+      const availableStock = await prisma.card.count({
+        where: {
+          status: "VERIFIED"
+        }
+      });
+      const distributedStock = await prisma.distribution.findMany({
+        where: {
+          status: 'DELIVERED',
+          scheduledAt: {
+            gte: new Date(new Date().getFullYear(), 0, 1, 0, 0, 0, 0),
+            lte: new Date(new Date().getFullYear(), 11, 31, 23, 59, 59, 999)
+          },
+          target: {
+            type: {
+              in: ['DC', 'STORE']
+            }
+          }
+        },
+        include: {
+          target: true
+        }
+      });
+      const storeDistributedStock = distributedStock.filter(d => d.target.type === 'STORE');
+      const warehouseDistributedStock = distributedStock.filter(d => d.target.type === 'DC');
+      const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+      let storeMonthlyCount: Record<string, number> = {}
+      let warehouseMonthlyCount: Record<string, number> = {}
+      for (let each of storeDistributedStock) {
+        if (!each.scheduledAt) continue;
+        const month = each.scheduledAt.getMonth();
+        const monthName = months[month] as string
+        if (!storeMonthlyCount[monthName]) {
+          storeMonthlyCount[monthName] = 0;
+        }
+        storeMonthlyCount[monthName] += each.amount;
+      }
+      for (let each of warehouseDistributedStock) {
+        if (!each.scheduledAt) continue;
+        const month = each.scheduledAt.getMonth();
+        const monthName = months[month] as string
+        if (!warehouseMonthlyCount[monthName]) {
+          warehouseMonthlyCount[monthName] = 0;
+        }
+        warehouseMonthlyCount[monthName] += each.amount;
+      }
+
+      const checkpoints = await prisma.$queryRaw`
+        SELECT c.*, cs."amount" as "stockAmount", cs."createdAt" as "stockCreatedAt"
+        FROM "Checkpoint" c
+        LEFT JOIN LATERAL (
+          SELECT "amount", "createdAt"
+          FROM "CardStock"
+          WHERE "checkpointCode" = c."code"
+          ORDER BY "amount" ASC
+          LIMIT 1
+        ) cs ON true
+        WHERE c."type" = 'STORE'
+        ORDER BY cs."amount" ASC
+        LIMIT 10
+      `
+
+      const warehouseDistributions = await prisma.distribution.findMany({
+        where: {
+          target: {
+            type: "DC"
+          }
+        },
+        include: {
+          target: true
+        },
+        orderBy: {
+          amount: 'desc'
+        },
+        take: 10
+      })
+
+      // Please do make sure to Indosat Team that what if some warehouse accepts other from other than HQ, aint them still considered as persebaran?
+
+      res.status(200).json({
+        message: 'Dashboard synced successfully',
+        data: {
+          totalStock,
+          availableStock,
+          storeMonthlyCount,
+          warehouseMonthlyCount,
+          checkpoints,
+          warehouseDistributions
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async getBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
@@ -80,12 +184,13 @@ class StockController {
         }
       });
 
+      const excluded: ItemStatus[] = ["UNVERIFIED", "LOST"];
       const totalBatch = await prisma.uploadBatch.count();
       const totalCards = await prisma.card.count();
       const totalVerified = await prisma.card.count({
         where: {
           status: {
-            not: "UNVERIFIED"
+            notIn: excluded
           }
         }
       });
@@ -330,15 +435,22 @@ class StockController {
       const batchCode = lastBatch ? `UP${lastBatch.id + 1}` : `UP1`;
 
       // Extract number data from the Excel file with batchCode
-      const jsonData = jsonResult.map(each => ({
-        sheet: each.sheet,
-        data: each.data.map((row: any) => ({
-          key: String(row.KEY || row.key),
-          checkpointCode: (row.CHECKPOINT || row.checkpoint) ? String(row.CHECKPOINT || row.checkpoint) : null,
-          remark: row.REMARK || row.remark || '',
-          batchCode: batchCode
-        })).filter((item: any) => item.key)
-      }))
+      const jsonData = jsonResult.map(each => {
+        const seen = new Set<string>();
+        const data = each.data
+          .map((row: any) => ({
+            key: String(row.KEY || row.key),
+            checkpointCode: (row.CHECKPOINT || row.checkpoint) ? String(row.CHECKPOINT || row.checkpoint) : null,
+            remark: row.REMARK || row.remark || '',
+            batchCode: batchCode
+          }))
+          .filter((item: any) => {
+            if (!item.key || item.key === 'undefined' || seen.has(item.key)) return false;
+            seen.add(item.key);
+            return true;
+          });
+        return { sheet: each.sheet, data };
+      });
 
       const batch = await prisma.uploadBatch.create({
         data: {
@@ -538,6 +650,14 @@ class StockController {
     }
   }
 
+  static async bulkMergeSim(req: Request, res: Response, next: NextFunction) {
+    try {
+      
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async mergeSim(req: Request, res: Response, next: NextFunction) {
     try {
       const { cardKey, numberKey, checkpointCode, type, trn } = req.body;
@@ -561,36 +681,41 @@ class StockController {
         if (!req.user) {
           throw new Error('User not found');
         }
-        const [number, checkpoint] = await Promise.all([
-          tx.number.findUnique({
-            where: {
-              key: numberKey,
-              status: "VERIFIED"
-            }
-          }),
-          tx.checkpoint.findUnique({
-            where: {
-              code: checkpointCode
-            }
-          }),
-          tx.number.update({
-            where: {
-              key: numberKey
-            },
-            data: {
-              status: 'SOLD'
-            }
-          })
-        ]);
+        const checkpoint = await tx.checkpoint.findUnique({
+          where: {
+            code: checkpointCode
+          }
+        })
         if (!checkpoint) {
           throw new Error('Checkpoint not found');
         }
-        if (!number) {
-          throw new Error('Number not found');
+        let number
+        if (type === "SIMCARD" || type === "ESIM") {
+          [number] = await Promise.all([
+            tx.number.findUnique({
+              where: {
+                key: numberKey,
+                status: "VERIFIED"
+              }
+            }),
+            tx.number.update({
+              where: {
+                key: numberKey
+              },
+              data: {
+                status: 'SOLD'
+              }
+            })
+          ]);
+          if (!number) {
+            throw new Error('Number not found');
+          }
+          if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
+            throw new Error('Number checkpoint code does not match checkpoint code');
+          }
         }
-
-        if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
-          throw new Error('Number checkpoint code does not match checkpoint code');
+        if (!checkpoint) {
+          throw new Error('Checkpoint not found');
         }
         let card
         if (type === "SIMCARD") {
@@ -639,24 +764,41 @@ class StockController {
 
         if (type === "ESIM") {
           esimCode = "ESIM-" + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+        } else if (type === "CPP") {
+          esimCode = "CPP-" + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+        } else if (type === "MIGRATION") {
+          esimCode = "MGR-" + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+        } else {
+          esimCode = cardKey;
         }
+        let sim
 
-        console.log(esimCode)
-
-        const sim = await tx.merge.create({
+        if (type === "SIMCARD") {
+          sim = await tx.merge.create({
             data: {
-              cardKey: type === "ESIM" ? esimCode : cardKey,
+              cardKey,
               numberKey,
-              type,
               checkpointCode,
               userCode: req.user.code,
               TRN: trn,
               soldAt: new Date()
             }
           })
+        } else {
+          sim = await tx.mergeAdditional.create({
+            data: {
+              cardKey: esimCode,
+              numberKey,
+              checkpointCode,
+              userCode: req.user.code,
+              TRN: trn,
+              type,
+              soldAt: new Date()
+            }
+          })
+        }
         return sim
       });
-
 
       res.status(200).json({
         message: 'Sim successfully merged',
@@ -860,25 +1002,59 @@ class StockController {
 
   static async getMerges(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, checkpointCode } = req.query;
+      const { page = 1, limit = 10, checkpointCode, startSoldAt, endSoldAt, cardRemark, search, type } = req.query;
 
-      let where = {}
+      let where: any = {}
       if (checkpointCode) {
-        where = {
-          checkpointCode: checkpointCode as string
+        where.checkpointCode = checkpointCode as string
+      }
+      if (startSoldAt) {
+        where.createdAt = {
+          gte: new Date(new Date(startSoldAt as string).setHours(0, 0, 0, 0))
         }
       }
+      if (endSoldAt) {
+        where.createdAt = {
+          ...where.createdAt,
+          lte: new Date(new Date(endSoldAt as string).setHours(23, 59, 59, 999))
+        }
+      }
+      if (cardRemark) {
+        where.number = {
+          remark: cardRemark as string
+        }
+      }
+      if (search) {
+        where.number = {
+          ...where.number,
+          key: {
+            contains: search as string
+          }
+        }
+      }
+      let merges
 
-      const merges = await prisma.merge.findMany({
-        skip: (Number(page) - 1) * Number(limit),
-        take: Number(limit),
-        orderBy: { createdAt: 'desc' },
-        where
-      });
-
+      if (type === "SIMCARD" || !type) {
+        merges = await prisma.merge.findMany({
+          skip: (Number(page) - 1) * Number(limit),
+          take: Number(limit),
+          orderBy: { createdAt: 'desc' },
+          where,
+          include: {
+            number: true
+          }
+        });
+      } else {
+        merges = await prisma.mergeAdditional.findMany({
+          skip: (Number(page) - 1) * Number(limit),
+          take: Number(limit),
+          orderBy: { createdAt: 'desc' },
+          where
+        });
+      }
       const total = await prisma.merge.count();
       const monthly = await prisma.merge.count({
-        where: {
+        where: { 
           createdAt: {
             gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
           }

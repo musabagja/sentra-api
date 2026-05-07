@@ -26,7 +26,7 @@ class CheckpointController {
 
   static async getCheckpoints(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, type, search } = req.query;
+      const { page = 1, limit = 10, type, search, startSoldAt, endSoldAt } = req.query;
 
       const where: Prisma.CheckpointWhereInput = {};
       if (type) {
@@ -50,6 +50,21 @@ class CheckpointController {
         ]
       }
 
+      const includeMerges = !!(startSoldAt || endSoldAt);
+      
+      const mergesWhere: any = {};
+      if (startSoldAt) {
+        mergesWhere.createdAt = {
+          gte: new Date(new Date(startSoldAt as string).setHours(0, 0, 0, 0))
+        };
+      }
+      if (endSoldAt) {
+        mergesWhere.createdAt = {
+          ...(mergesWhere.createdAt || {}),
+          lte: new Date(new Date(endSoldAt as string).setHours(23, 59, 59, 999))
+        };
+      }
+
       const findManyOptions: any = {
         where,
         skip: (Number(page) - 1) * Number(limit),
@@ -57,7 +72,9 @@ class CheckpointController {
           _count: {
             select: {
               cards: true,
-              merges: true
+              merges: includeMerges ? {
+                where: mergesWhere
+              } : true
             }
           }
         },
