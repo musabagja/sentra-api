@@ -266,6 +266,71 @@ class StockController {
     }
   }
 
+  static async deleteBatch(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+
+      const batch = await prisma.uploadBatch.findUnique({
+        where: { id: Number(id) },
+        include: {
+          cards: {
+            select: { key: true, id: true, status: true, checkpointCode: true }
+          }
+        }
+      });
+
+      if (!batch) {
+        throw new Error('Batch not found');
+      }
+
+      if (batch.status === 'COMPLETED') {
+        const err = new Error('Cannot delete a completed batch');
+        (err as any).status = 400;
+        throw err;
+      }
+
+      const allowedStatuses: ItemStatus[] = ['VERIFIED', 'UNVERIFIED', 'BROKEN', 'LOST'];
+      const invalidCards = batch.cards.filter(card => !allowedStatuses.includes(card.status));
+
+      if (invalidCards.length > 0) {
+        const invalidStatusList = [...new Set(invalidCards.map(c => c.status))].join(', ');
+        const err = new Error(`Cannot delete batch: ${invalidCards.length} card(s) have status (${invalidStatusList}) that cannot be deleted`);
+        (err as any).status = 400;
+        throw err;
+      }
+
+      const checkpointCodes = [...new Set(batch.cards.map(c => c.checkpointCode))];
+      const cardIds = batch.cards.map(c => c.id);
+      const cardKeys = batch.cards.map(c => c.key);
+
+      await prisma.$transaction(async (tx) => {
+        if (cardIds.length > 0) {
+          await tx.cardMovement.deleteMany({ where: { cardID: { in: cardIds } } });
+        }
+
+        if (cardKeys.length > 0) {
+          await tx.merge.deleteMany({ where: { cardKey: { in: cardKeys } } });
+        }
+
+        await tx.card.deleteMany({ where: { batchCode: batch.code } });
+        await tx.number.deleteMany({ where: { batchCode: batch.code } });
+
+        if (checkpointCodes.length > 0) {
+          await tx.cardStock.deleteMany({ where: { checkpointCode: { in: checkpointCodes } } });
+        }
+
+        await tx.uploadBatchProgress.deleteMany({ where: { batchCode: batch.code } });
+        await tx.uploadBatch.delete({ where: { id: batch.id } });
+      });
+
+      res.status(200).json({
+        message: 'Batch deleted successfully'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async getCards(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, status, search, uploadAt, batch, validatedAt } = req.query;
@@ -426,13 +491,38 @@ class StockController {
         });
       }
 
-      const lastBatch = await prisma.uploadBatch.findFirst({
-        orderBy: {
-          id: 'desc'
-        }
-      });
+      const { batchID } = req.body;
 
-      const batchCode = lastBatch ? `UP${lastBatch.id + 1}` : `UP1`;
+      let batch: { id: number; code: string; userCode: string; status: string };
+
+      if (batchID) {
+        const existingBatch = await prisma.uploadBatch.findUnique({
+          where: { id: Number(batchID) }
+        });
+
+        if (!existingBatch) {
+          throw new Error(`Batch with id ${batchID} not found`);
+        }
+
+        batch = existingBatch as typeof batch;
+      } else {
+        const lastBatch = await prisma.uploadBatch.findFirst({
+          orderBy: { id: 'desc' }
+        });
+
+        const batchCode = lastBatch ? `UP${lastBatch.id + 1}` : `UP1`;
+
+        batch = await prisma.uploadBatch.create({
+          data: {
+            code: batchCode,
+            userCode: req.user.code,
+            status: "ONGOING",
+            total: 0
+          }
+        });
+      }
+
+      const batchCode = batch.code;
 
       // Extract number data from the Excel file with batchCode
       const jsonData = jsonResult.map(each => {
@@ -452,14 +542,12 @@ class StockController {
         return { sheet: each.sheet, data };
       });
 
-      const batch = await prisma.uploadBatch.create({
-        data: {
-          code: batchCode,
-          userCode: req.user.code,
-          status: "ONGOING",
-          total: jsonData.find(each => each.sheet === 'ICCID')?.data.length || 0
-        }
-      });
+      if (!batchID) {
+        await prisma.uploadBatch.update({
+          where: { id: batch.id },
+          data: { total: jsonData.find(each => each.sheet === 'ICCID')?.data.length || 0 }
+        });
+      }
 
       // Bulk create cards and numbers with batchCode
       const result = await Promise.all(
@@ -480,8 +568,16 @@ class StockController {
 
       const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
 
-      // Delete the batch if no items were created
-      if (totalCreated === 0) {
+      if (batchID) {
+        const newCardsCount = result[jsonData.findIndex(each => each.sheet === 'ICCID')]?.count ?? 0;
+        await prisma.uploadBatch.update({
+          where: { id: batch.id },
+          data: { total: { increment: newCardsCount } }
+        });
+      }
+
+      // Delete the newly created batch if no items were created
+      if (totalCreated === 0 && !batchID) {
         await prisma.uploadBatch.delete({
           where: {
             code: batch.code
