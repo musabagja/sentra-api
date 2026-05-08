@@ -14,6 +14,8 @@ router.get('/batches/:id', StockController.getBatch);
 
 router.put('/batches/close/:id', StockController.completeBatch);
 
+router.delete('/batches/:id', StockController.deleteBatch);
+
 // GET /api/stock/cards - Get all cards with pagination and filtering
 router.get('/cards', StockController.getCards);
 
