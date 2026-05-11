@@ -53,6 +53,8 @@ router.post('/upload/xlsx', upload('xlsx').single('source'), StockController.upl
 // POST /api/stock/merge - Merge card and number
 router.post('/merges', StockController.mergeSim);
 
+router.post('/merges/bulk', StockController.bulkMergeSim);
+
 router.get('/merges', StockController.getMerges);
 
 // GET /api/stock/dashboard - Get dashboard data
