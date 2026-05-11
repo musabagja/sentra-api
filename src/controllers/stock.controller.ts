@@ -504,6 +504,10 @@ class StockController {
           throw new Error(`Batch with id ${batchID} not found`);
         }
 
+        if (existingBatch.status === "COMPLETED") {
+          throw new Error(`Batch with id ${batchID} is already completed`);
+        }
+
         batch = existingBatch as typeof batch;
       } else {
         const lastBatch = await prisma.uploadBatch.findFirst({
@@ -748,7 +752,78 @@ class StockController {
 
   static async bulkMergeSim(req: Request, res: Response, next: NextFunction) {
     try {
-      
+      const { sims, checkpointCode, type, trn } = req.body;
+
+      if (!req.user) throw new Error('User not found');
+      if (!Array.isArray(sims) || sims.length === 0) throw new Error('sims must be a non-empty array');
+      if (!type) throw new Error('Type is required');
+      if (type === 'SIMCARD' && sims.some((s: any) => !s.cardKey)) throw new Error('ICCID is required for SIMCARD type');
+      if (!checkpointCode) throw new Error('Checkpoint code is required');
+      if (!trn) throw new Error('TRN is required');
+
+      const results = await prisma.$transaction(async (tx) => {
+        const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
+        if (!checkpoint) throw new Error(`Checkpoint not found: ${checkpointCode}`);
+
+        const merged = [];
+
+        for (const { cardKey, numberKey } of sims) {
+          if (type === 'SIMCARD' || type === 'ESIM') {
+            const number = await tx.number.findUnique({ where: { key: numberKey, status: 'VERIFIED' } });
+            if (!number) throw new Error(`Number not found or not verified: ${numberKey}`);
+            if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
+              throw new Error(`Number checkpoint code does not match: ${numberKey}`);
+            }
+            await tx.number.update({ where: { key: numberKey }, data: { status: 'SOLD' } });
+          }
+
+          let esimCode = '';
+          if (type === 'ESIM') {
+            esimCode = 'ESIM-' + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+          } else if (type === 'CPP') {
+            esimCode = 'CPP-' + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+          } else if (type === 'MIGRATION') {
+            esimCode = 'MGR-' + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+          } else {
+            esimCode = cardKey;
+          }
+
+          if (type === 'SIMCARD') {
+            const card = await tx.card.findUnique({ where: { key: cardKey, status: 'VERIFIED' } });
+            if (!card) throw new Error(`Card not found or not verified: ${cardKey}`);
+            if (checkpoint.code !== card.checkpointCode) {
+              throw new Error(`Checkpoint code does not match card checkpoint code: ${cardKey}`);
+            }
+            await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
+
+            const stock = await tx.cardStock.findFirst({
+              where: { checkpointCode: card.checkpointCode },
+              orderBy: { createdAt: 'desc' }
+            });
+            if (!stock || Number(stock.amount) <= 0) {
+              throw new Error(`Card unavailable at checkpoint: ${checkpointCode}`);
+            }
+            await tx.cardStock.create({
+              data: { checkpointCode: card.checkpointCode, amount: Number(stock.amount) - 1 }
+            });
+
+            merged.push(await tx.merge.create({
+              data: { cardKey, numberKey, checkpointCode, userCode: req.user!.code, TRN: trn, soldAt: new Date() }
+            }));
+          } else {
+            merged.push(await tx.mergeAdditional.create({
+              data: { cardKey: esimCode, numberKey, checkpointCode, userCode: req.user!.code, TRN: trn, type, soldAt: new Date() }
+            }));
+          }
+        }
+
+        return merged;
+      });
+
+      res.status(200).json({
+        message: 'Sims successfully merged',
+        data: results
+      });
     } catch (error) {
       next(error);
     }
