@@ -2,7 +2,7 @@ import bcrypt from 'bcrypt'
 
 class Bcrypt {
   static hash = (string: string) => {
-    return bcrypt.hashSync(string, process.env.BCRYPT_SALT_ROUND as string)
+    return bcrypt.hashSync(string, Number(process.env.BCRYPT_SALT_ROUND) || 10)
   }
 
   static compare = (string: string, hash: string) => {

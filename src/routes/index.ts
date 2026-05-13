@@ -7,6 +7,7 @@ import distributionRouter from './distribution';
 import checkpointRouter from './checkpoint';
 import errorHandler from '../middlewares/error.handler';
 import Auth from '../middlewares/auth.handler';
+import CheckpointAccess from '../middlewares/checkpoint-access.handler';
 
 const router = express.Router();
 
@@ -14,10 +15,12 @@ const router = express.Router();
 // API ROUTES
 // ============================================================================
 
-// User authentication routes
+// User authentication routes (no auth required)
 router.use('/user', userRouter);
 
+// All routes below require authentication + checkpoint scope resolution
 router.use(Auth.authenticate);
+router.use(CheckpointAccess.load);
 
 // Stock management routes (cards and numbers)
 router.use('/stock', stockRouter);

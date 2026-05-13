@@ -61,38 +61,39 @@ enum OpnameConditionStatus {
 //
 
 model Checkpoint {
-  id   Int         @id @default(autoincrement())
-  code String         @unique
-  type CheckpointType
-  name String
-  createdAt  DateTime  @default(now())
+  id        Int            @id @default(autoincrement())
+  code      String         @unique
+  type      CheckpointType
+  name      String
+  createdAt DateTime       @default(now())
 
-  cards                  Card[]
-  cardStock              CardStock[]
-  numbers                Number[]
-  cardMovementsAsSource  CardMovement[]  @relation("CardMovementSource")
-  cardMovementsAsTarget  CardMovement[]  @relation("CardMovementTarget")
+  cards                   Card[]
+  cardStock               CardStock[]
+  numbers                 Number[]
+  cardMovementsAsSource   CardMovement[]   @relation("CardMovementSource")
+  cardMovementsAsTarget   CardMovement[]   @relation("CardMovementTarget")
   numberMovementsAsSource NumberMovement[] @relation("NumberMovementSource")
   numberMovementsAsTarget NumberMovement[] @relation("NumberMovementTarget")
-  distributionsAsSource Distribution[] @relation("DistributionSource")
-  distributionsAsTarget Distribution[] @relation("DistributionTarget")
-  merges                Merge[]
-  mergeAdditionals      MergeAdditional[]
+  distributionsAsSource   Distribution[]   @relation("DistributionSource")
+  distributionsAsTarget   Distribution[]   @relation("DistributionTarget")
+  merges                  Merge[]
+  mergeAdditionals        MergeAdditional[]
+  checkpointCircles       CheckpointCircle[]
 }
 
 model Card {
   id             Int        @id @default(autoincrement())
   name           String?
   key            String     @unique
-  checkpointCode String
+  checkpointCode String?
   status         ItemStatus @default(UNVERIFIED)
   remark         String?
   batchCode      String
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
-  validatedAt     DateTime?
+  validatedAt    DateTime?
 
-  checkpoint        Checkpoint         @relation(fields: [checkpointCode], references: [code])
+  checkpoint        Checkpoint?       @relation(fields: [checkpointCode], references: [code])
   uploadBatch       UploadBatch        @relation(fields: [batchCode], references: [code])
   movements         CardMovement[]
   distributionItems DistributionItem[]
@@ -171,9 +172,10 @@ model Merge {
   createdAt  DateTime  @default(now())
   verifiedAt DateTime?
 
-  card Card @relation(fields: [cardKey], references: [key])
-  number Number @relation(fields: [numberKey], references: [key])
+  card       Card        @relation(fields: [cardKey], references: [key])
+  number     Number      @relation(fields: [numberKey], references: [key])
   checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code])
+  user       User        @relation(fields: [userCode], references: [code])
 
   @@index([soldAt])
 }
@@ -192,6 +194,7 @@ model MergeAdditional {
   verifiedAt DateTime?
 
   checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code])
+  user       User        @relation(fields: [userCode], references: [code])
 
   @@index([soldAt])
 }
@@ -201,13 +204,15 @@ model MergeAdditional {
 //
 
 model CardStock {
-  id             Int   @id @default(autoincrement())
+  id             Int      @id @default(autoincrement())
   checkpointCode String
   amount         Int
   updatedAt      DateTime @updatedAt
-  createdAt  DateTime  @default(now())
+  createdAt      DateTime @default(now())
 
   checkpoint Checkpoint @relation(fields: [checkpointCode], references: [code])
+
+  @@index([checkpointCode])
 }
 
 //
@@ -223,9 +228,10 @@ model CardMovement {
   targetCode String?
   createdAt  DateTime     @default(now())
 
-  card Card @relation(fields: [cardID], references: [id])
+  card   Card        @relation(fields: [cardID], references: [id])
   source Checkpoint? @relation(name: "CardMovementSource", fields: [sourceCode], references: [code])
   target Checkpoint? @relation(name: "CardMovementTarget", fields: [targetCode], references: [code])
+  user   User        @relation(fields: [userCode], references: [code])
 
   @@index([cardID])
   @@index([createdAt])
@@ -240,9 +246,10 @@ model NumberMovement {
   targetCode String?
   createdAt  DateTime     @default(now())
 
-  number Number @relation(fields: [numberID], references: [id])
+  number Number      @relation(fields: [numberID], references: [id])
   source Checkpoint? @relation(name: "NumberMovementSource", fields: [sourceCode], references: [code])
   target Checkpoint? @relation(name: "NumberMovementTarget", fields: [targetCode], references: [code])
+  user   User        @relation(fields: [userCode], references: [code])
 
   @@index([numberID])
   @@index([createdAt])
@@ -264,10 +271,11 @@ model Distribution {
   completedAt DateTime?
   createdAt  DateTime           @default(now())
 
-  items DistributionItem[]
-  submittance DistributionSubmittance? @relation("DistributionSubmittance")
-  source Checkpoint @relation(name: "DistributionSource", fields: [sourceCode], references: [code])
-  target Checkpoint @relation(name: "DistributionTarget", fields: [targetCode], references: [code])
+  items       DistributionItem[]
+  submittance DistributionSubmittance?   @relation("DistributionSubmittance")
+  source      Checkpoint                @relation(name: "DistributionSource", fields: [sourceCode], references: [code])
+  target      Checkpoint                @relation(name: "DistributionTarget", fields: [targetCode], references: [code])
+  user        User                      @relation(fields: [userCode], references: [code])
 }
 
 model DistributionSubmittance {
@@ -285,6 +293,7 @@ model DistributionSubmittance {
   createdAt  DateTime           @default(now())
 
   distribution Distribution @relation("DistributionSubmittance", fields: [distributionID], references: [id])
+  user         User         @relation(fields: [userCode], references: [code])
 
   @@index([distributionID])
 }
@@ -317,6 +326,7 @@ model Opname {
   createdAt      DateTime       @default(now())
 
   updates OpnameUpdate[]
+  user    User           @relation(fields: [userCode], references: [code])
 }
 
 model OpnameUpdate {
@@ -328,6 +338,7 @@ model OpnameUpdate {
   createdAt DateTime              @default(now())
 
   opname Opname @relation(fields: [opnameID], references: [id])
+  user   User   @relation(fields: [userCode], references: [code])
 
   @@index([itemID])
 }

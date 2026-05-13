@@ -1,6 +1,5 @@
 import type { Request } from 'express';
 
-// User interface matching Prisma User model
 interface User {
   id: number;
   code: string;
@@ -8,13 +7,18 @@ interface User {
   phone: string;
   password: string | null;
   imageURL: string | null;
+  status: string;
+  circleCode: string;
   createdAt: Date;
+  updatedAt: Date;
 }
 
 declare global {
   namespace Express {
     interface Request {
       user?: User;
+      /** Checkpoint codes the authenticated user may access, loaded by CheckpointAccess.load */
+      checkpointCodes?: string[];
     }
   }
 }

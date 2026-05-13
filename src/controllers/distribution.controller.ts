@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import prisma from "../../lib/prisma";
+import { hasCheckpointAccess, resolveCheckpointFilter } from "../utils/access.util";
 
 class DistributionController {
   // ============================================================================
@@ -10,34 +11,26 @@ class DistributionController {
     try {
       const { targetCode, scheduledAt, cardKeys } = req.body;
 
+      if (!req.user) throw new Error('User not found');
+      if (!Array.isArray(cardKeys)) throw new Error('Cards must be an array');
+
+      const allowed = req.checkpointCodes ?? [];
+
       const [distributions, cards, missingKeys] = await prisma.$transaction<[any[], any[], string[]]>(async (tx) => {
 
-        const user = req.user
+        const user = req.user!;
 
-        if (!user) {
-          throw new Error('User not found');
-        }
-
-        if (!Array.isArray(cardKeys)) {
-          throw new Error('Cards must be an array');
-        }
-
-        const targetCheckpoint = await tx.checkpoint.findUnique({
-          where: {
-            code: targetCode
-          }
-        });
-
+        const targetCheckpoint = await tx.checkpoint.findUnique({ where: { code: targetCode } });
         if (!targetCheckpoint) {
           throw new Error('Target checkpoint not found');
         }
 
+        // Only consider cards that are at checkpoints within the user's circle
         const foundCards = await tx.card.findMany({
           where: {
-            key: {
-              in: cardKeys
-            },
-            status: "VERIFIED"
+            key: { in: cardKeys },
+            status: "VERIFIED",
+            checkpointCode: { in: allowed }
           }
         });
 
@@ -77,6 +70,7 @@ class DistributionController {
 
         const cardsBySource = foundCards.reduce((acc, card) => {
           const key = card.checkpointCode;
+          if (!key) throw new Error(`Card ${card.key} has no checkpoint assigned and cannot be distributed`);
           if (!acc[key]) acc[key] = [];
           acc[key].push(card);
           return acc;
@@ -121,11 +115,18 @@ class DistributionController {
   static async getDistributions(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, status, sourceCode, targetCode, startDueDate, endDueDate } = req.query;
+      const allowed = req.checkpointCodes ?? [];
 
-      const where: any = {};
+      // A user sees distributions where they own either end (source or target)
+      const where: any = {
+        AND: [{
+          OR: [
+            { sourceCode: { in: resolveCheckpointFilter(sourceCode as string | undefined, allowed) } },
+            { targetCode: { in: resolveCheckpointFilter(targetCode as string | undefined, allowed) } }
+          ]
+        }]
+      };
       if (status) where.status = status;
-      if (sourceCode) where.sourceCode = sourceCode;
-      if (targetCode) where.targetCode = targetCode;
       if (startDueDate) where.scheduledAt = { gte: new Date(startDueDate as string) };
       if (endDueDate) where.scheduledAt = { lte: new Date(endDueDate as string) };
 
@@ -173,22 +174,26 @@ class DistributionController {
     try {
       const { id } = req.params;
 
+      const allowed = req.checkpointCodes ?? [];
+
       const distribution = await prisma.distribution.findUnique({
         where: { id: Number(id) },
         include: {
-          items: {
-            include: {
-              card: true
-            }
-          },
+          items: { include: { card: true } },
           submittance: true,
           source: true,
           target: true
         }
       });
 
-      if (!distribution) {
-        throw new Error('Distribution not found');
+      if (
+        !distribution ||
+        (!hasCheckpointAccess(distribution.sourceCode, allowed) &&
+         !hasCheckpointAccess(distribution.targetCode, allowed))
+      ) {
+        const err = new Error('Distribution not found');
+        (err as any).status = 404;
+        throw err;
       }
 
       res.status(200).json({
@@ -204,6 +209,7 @@ class DistributionController {
     try {
       const { id } = req.params;
       const { status, scheduledAt } = req.body;
+      const allowed = req.checkpointCodes ?? [];
 
       const updatedDistribution = await prisma.$transaction(async (tx) => {
         const user = req.user;
@@ -231,8 +237,14 @@ class DistributionController {
           }
         });
 
-        if (!distribution) {
-          throw new Error('Distribution not found');
+        if (
+          !distribution ||
+          (!hasCheckpointAccess(distribution.sourceCode, allowed) &&
+           !hasCheckpointAccess(distribution.targetCode, allowed))
+        ) {
+          const err = new Error('Distribution not found');
+          (err as any).status = 404;
+          throw err;
         }
 
         if (distribution.items.length === 0) {
@@ -284,17 +296,22 @@ class DistributionController {
   static async cancelDistribution(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
 
       const distribution = await prisma.$transaction(async (tx) => {
         const currentDistribution = await tx.distribution.findUnique({
           where: { id: Number(id) },
-          include: {
-            items: true
-          }
+          include: { items: true }
         });
-        
-        if (!currentDistribution) {
-          throw new Error('Distribution not found');
+
+        if (
+          !currentDistribution ||
+          (!hasCheckpointAccess(currentDistribution.sourceCode, allowed) &&
+           !hasCheckpointAccess(currentDistribution.targetCode, allowed))
+        ) {
+          const err = new Error('Distribution not found');
+          (err as any).status = 404;
+          throw err;
         }
 
         if (currentDistribution.status === "DELIVERED") {
@@ -349,14 +366,12 @@ class DistributionController {
         recipientName
       } = req.body;
 
+      const allowed = req.checkpointCodes ?? [];
+
       const submittance = await prisma.$transaction(async (tx) => {
-        const user = req.user;
-        
-        if (!user) {
-          throw new Error('User not found');
-        }
-  
-        const distribution = await prisma.distribution.findUnique({
+        const user = req.user!;
+
+        const distribution = await tx.distribution.findUnique({
           where: { id: Number(id) },
           include: {
             items: {
@@ -366,16 +381,18 @@ class DistributionController {
             }
           }
         });
-  
-        if (!distribution) {
-          throw new Error('Distribution not found');
+
+        if (!distribution || !hasCheckpointAccess(distribution.sourceCode, allowed)) {
+          const err = new Error('Distribution not found');
+          (err as any).status = 404;
+          throw err;
         }
-  
+
         if (distribution.status === "DELIVERED") {
           throw new Error('Distribution is already completed');
         }
-  
-        const submittance = await prisma.distributionSubmittance.create({
+
+        const submittance = await tx.distributionSubmittance.create({
           data: {
             distributionID: Number(id),
             userCode: user.code,
@@ -389,8 +406,8 @@ class DistributionController {
             recipientName: recipientName || null
           }
         });
-  
-        await prisma.distribution.update({
+
+        await tx.distribution.update({
           where: { id: Number(id) },
           data: {
             status: "DELIVERED",
