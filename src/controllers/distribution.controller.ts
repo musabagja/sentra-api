@@ -491,6 +491,18 @@ class DistributionController {
   static async deleteDistribution(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
+
+      const existing = await prisma.distribution.findUnique({ where: { id: Number(id) } });
+      if (
+        !existing ||
+        (!hasCheckpointAccess(existing.sourceCode, allowed) &&
+         !hasCheckpointAccess(existing.targetCode, allowed))
+      ) {
+        const err = new Error('Distribution not found');
+        (err as any).status = 404;
+        throw err;
+      }
 
       await prisma.distribution.delete({
         where: { id: Number(id) }
