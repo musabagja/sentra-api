@@ -8,91 +8,74 @@ class StockController {
 
   static async dashboardSync (req: Request, res: Response, next: NextFunction) {
     try {
+      const allowed = req.checkpointCodes ?? [];
       const excluded: ItemStatus[] = ["UNVERIFIED", "LOST"]
-      const totalStock = await prisma.card.count({
-        where: {
-          status: {
-            notIn: excluded
-          }
-        }
-      });
-      const availableStock = await prisma.card.count({
-        where: {
-          status: "VERIFIED"
-        }
-      });
+
+      const [totalStock, availableStock] = await Promise.all([
+        prisma.card.count({
+          where: { checkpointCode: { in: allowed }, status: { notIn: excluded } }
+        }),
+        prisma.card.count({
+          where: { checkpointCode: { in: allowed }, status: "VERIFIED" }
+        })
+      ]);
+
       const distributedStock = await prisma.distribution.findMany({
         where: {
           status: 'DELIVERED',
+          OR: [
+            { sourceCode: { in: allowed } },
+            { targetCode: { in: allowed } }
+          ],
           scheduledAt: {
             gte: new Date(new Date().getFullYear(), 0, 1, 0, 0, 0, 0),
             lte: new Date(new Date().getFullYear(), 11, 31, 23, 59, 59, 999)
           },
-          target: {
-            type: {
-              in: ['DC', 'STORE']
-            }
-          }
+          target: { type: { in: ['DC', 'STORE'] } }
         },
-        include: {
-          target: true
-        }
+        include: { target: true }
       });
+
       const storeDistributedStock = distributedStock.filter(d => d.target.type === 'STORE');
       const warehouseDistributedStock = distributedStock.filter(d => d.target.type === 'DC');
       const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
       let storeMonthlyCount: Record<string, number> = {}
       let warehouseMonthlyCount: Record<string, number> = {}
+
       for (let each of storeDistributedStock) {
         if (!each.scheduledAt) continue;
-        const month = each.scheduledAt.getMonth();
-        const monthName = months[month] as string
-        if (!storeMonthlyCount[monthName]) {
-          storeMonthlyCount[monthName] = 0;
-        }
-        storeMonthlyCount[monthName] += each.amount;
+        const monthName = months[each.scheduledAt.getMonth()] as string;
+        storeMonthlyCount[monthName] = (storeMonthlyCount[monthName] ?? 0) + each.amount;
       }
       for (let each of warehouseDistributedStock) {
         if (!each.scheduledAt) continue;
-        const month = each.scheduledAt.getMonth();
-        const monthName = months[month] as string
-        if (!warehouseMonthlyCount[monthName]) {
-          warehouseMonthlyCount[monthName] = 0;
-        }
-        warehouseMonthlyCount[monthName] += each.amount;
+        const monthName = months[each.scheduledAt.getMonth()] as string;
+        warehouseMonthlyCount[monthName] = (warehouseMonthlyCount[monthName] ?? 0) + each.amount;
       }
 
-      const checkpoints = await prisma.$queryRaw`
-        SELECT c.*, cs."amount" as "stockAmount", cs."createdAt" as "stockCreatedAt"
-        FROM "Checkpoint" c
-        LEFT JOIN LATERAL (
-          SELECT "amount", "createdAt"
-          FROM "CardStock"
-          WHERE "checkpointCode" = c."code"
-          ORDER BY "amount" ASC
-          LIMIT 1
-        ) cs ON true
-        WHERE c."type" = 'STORE'
-        ORDER BY cs."amount" ASC
-        LIMIT 10
-      `
+      const checkpoints = await prisma.checkpoint.findMany({
+        where: { code: { in: allowed }, type: 'STORE' },
+        include: {
+          cardStock: {
+            orderBy: { createdAt: 'desc' },
+            take: 1
+          }
+        },
+        take: 10
+      });
 
       const warehouseDistributions = await prisma.distribution.findMany({
         where: {
-          target: {
-            type: "DC"
-          }
+          OR: [
+            { sourceCode: { in: allowed } },
+            { targetCode: { in: allowed } }
+          ],
+          target: { type: "DC" }
         },
-        include: {
-          target: true
-        },
-        orderBy: {
-          amount: 'desc'
-        },
+        include: { target: true },
+        orderBy: { amount: 'desc' },
         take: 10
-      })
-
-      // Please do make sure to Indosat Team that what if some warehouse accepts other from other than HQ, aint them still considered as persebaran?
+      });
 
       res.status(200).json({
         message: 'Dashboard synced successfully',
@@ -113,6 +96,7 @@ class StockController {
   static async getBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
 
       const batch = await prisma.uploadBatch.findUnique({
         where: { id: Number(id) },
@@ -123,8 +107,10 @@ class StockController {
         }
       });
 
-      if (!batch) {
-        throw new Error('Batch not found');
+      if (!batch || !batch.cards.some(c => allowed.includes(c.checkpointCode))) {
+        const err = new Error('Batch not found');
+        (err as any).status = 404;
+        throw err;
       }
 
       res.status(200).json({
@@ -139,62 +125,46 @@ class StockController {
   static async getBatches(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, status, search } = req.query;
+      const allowed = req.checkpointCodes ?? [];
 
       const allowedStatus = ['ONGOING', 'COMPLETED'];
 
       if (status && !allowedStatus.includes(status as string)) {
         throw new Error('Invalid status');
-      } 
+      }
 
-      const where: any = {};
+      const where: any = {
+        cards: { some: { checkpointCode: { in: allowed } } }
+      };
       if (status) {
         where.status = status as UploadBatchStatus;
       }
-
       if (search) {
         where.OR = [
-          {
-            code: {
-              contains: search as string,
-              mode: 'insensitive'
-            }
-          },
-          {
-            name: {
-              contains: search as string,
-              mode: 'insensitive'
-            }
-          }
-        ]
+          { code: { contains: search as string, mode: 'insensitive' } },
+          { name: { contains: search as string, mode: 'insensitive' } }
+        ];
       }
 
       const batches = await prisma.uploadBatch.findMany({
         take: Number(limit),
         skip: (Number(page) - 1) * Number(limit),
         where,
-        orderBy: {
-          createdAt: 'desc'
-        },
+        orderBy: { createdAt: 'desc' },
         include: {
           progress: {
             take: 1,
-            orderBy: {
-              createdAt: 'desc'
-            }
+            orderBy: { createdAt: 'desc' }
           }
         }
       });
 
       const excluded: ItemStatus[] = ["UNVERIFIED", "LOST"];
-      const totalBatch = await prisma.uploadBatch.count();
-      const totalCards = await prisma.card.count();
-      const totalVerified = await prisma.card.count({
-        where: {
-          status: {
-            notIn: excluded
-          }
-        }
-      });
+      const [totalBatch, totalCards, totalVerified] = await Promise.all([
+        prisma.uploadBatch.count({ where }),
+        prisma.card.count({ where: { checkpointCode: { in: allowed } } }),
+        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: { notIn: excluded } } })
+      ]);
       const totalUnverified = totalCards - totalVerified;
 
       res.status(200).json({
@@ -224,16 +194,18 @@ class StockController {
     try {
       const { id } = req.params;
       const { note } = req.body;
+      const allowed = req.checkpointCodes ?? [];
 
       const batch = await prisma.$transaction(async (tx) => {
         const currentBatch = await tx.uploadBatch.findUnique({
-          where: {
-            id: Number(id)
-          }
+          where: { id: Number(id) },
+          include: { cards: { select: { checkpointCode: true } } }
         });
 
-        if (!currentBatch) {
-          throw new Error('Batch not found');
+        if (!currentBatch || !currentBatch.cards.some(c => allowed.includes(c.checkpointCode))) {
+          const err = new Error('Batch not found');
+          (err as any).status = 404;
+          throw err;
         }
         
         await tx.card.updateMany({
@@ -270,6 +242,7 @@ class StockController {
   static async deleteBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
 
       const batch = await prisma.uploadBatch.findUnique({
         where: { id: Number(id) },
@@ -280,8 +253,10 @@ class StockController {
         }
       });
 
-      if (!batch) {
-        throw new Error('Batch not found');
+      if (!batch || !batch.cards.some(c => allowed.includes(c.checkpointCode))) {
+        const err = new Error('Batch not found');
+        (err as any).status = 404;
+        throw err;
       }
 
       if (batch.status === 'COMPLETED') {
@@ -446,6 +421,14 @@ class StockController {
   static async deleteCard(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
+
+      const existing = await prisma.card.findUnique({ where: { id: Number(id) } });
+      if (!existing || !hasCheckpointAccess(existing.checkpointCode, allowed)) {
+        const err = new Error('Card not found');
+        (err as any).status = 404;
+        throw err;
+      }
 
       await prisma.card.delete({
         where: { id: Number(id) }
@@ -1128,6 +1111,14 @@ class StockController {
     try {
       const { key } = req.params;
       const { name, status, remark } = req.body;
+      const allowed = req.checkpointCodes ?? [];
+
+      const existing = await prisma.number.findUnique({ where: { key: key as string } });
+      if (!existing || !hasCheckpointAccess(existing.checkpointCode, allowed, true)) {
+        const err = new Error('Number not found');
+        (err as any).status = 404;
+        throw err;
+      }
 
       const number = await prisma.number.update({
         where: { key: key as string },
@@ -1153,6 +1144,14 @@ class StockController {
   static async deleteNumber(req: Request, res: Response, next: NextFunction) {
     try {
       const { key } = req.params;
+      const allowed = req.checkpointCodes ?? [];
+
+      const existing = await prisma.number.findUnique({ where: { key: key as string } });
+      if (!existing || !hasCheckpointAccess(existing.checkpointCode, allowed, true)) {
+        const err = new Error('Number not found');
+        (err as any).status = 404;
+        throw err;
+      }
 
       await prisma.number.delete({
         where: { key: key as string }
