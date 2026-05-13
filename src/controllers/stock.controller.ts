@@ -300,7 +300,7 @@ class StockController {
         throw err;
       }
 
-      const checkpointCodes = [...new Set(batch.cards.map(c => c.checkpointCode).filter((c): c is string => c !== null))];
+      const checkpointCodes = [...new Set(batch.cards.map(c => c.checkpointCode))];
       const cardIds = batch.cards.map(c => c.id);
       const cardKeys = batch.cards.map(c => c.key);
 
@@ -495,17 +495,26 @@ class StockController {
       const { batchID } = req.body;
       const userCode = req.user.code;
 
-      // Prepare rows without batchCode; batchCode is injected inside the transaction
+      // Prepare rows without batchCode; batchCode is injected inside the transaction.
+      // ICCID rows without a CHECKPOINT column are skipped — cards require a checkpoint.
+      // MSISDN rows may omit CHECKPOINT (numbers are globally accessible).
+      let skippedCardRows = 0;
       const preparedSheets = parsedSheets.map(({ sheet, rows }) => {
         const seen = new Set<string>();
         const data = rows
-          .map((row: any) => ({
-            key: String(row.KEY || row.key),
-            checkpointCode: (row.CHECKPOINT || row.checkpoint)
-              ? String(row.CHECKPOINT || row.checkpoint)
-              : null,
-            remark: row.REMARK || row.remark || ''
-          }))
+          .flatMap((row: any) => {
+            const key = String(row.KEY || row.key);
+            const rawCheckpoint = row.CHECKPOINT || row.checkpoint;
+            if (sheet === 'ICCID' && !rawCheckpoint) {
+              skippedCardRows++;
+              return [];
+            }
+            return [{
+              key,
+              checkpointCode: rawCheckpoint ? String(rawCheckpoint) : null,
+              remark: row.REMARK || row.remark || ''
+            }];
+          })
           .filter((item: any) => {
             if (!item.key || item.key === 'undefined' || seen.has(item.key)) return false;
             seen.add(item.key);
@@ -548,7 +557,7 @@ class StockController {
         const result = await Promise.all(
           jsonData.map(({ sheet, data }) =>
             sheet === 'ICCID'
-              ? tx.card.createMany({ data, skipDuplicates: true })
+              ? tx.card.createMany({ data: data as any[], skipDuplicates: true })
               : tx.number.createMany({ data, skipDuplicates: true })
           )
         );
@@ -569,8 +578,8 @@ class StockController {
       });
 
       res.status(200).json({
-        message: 'Numbers uploaded successfully',
-        data: { total: parsedTotal, created: totalCreated }
+        message: 'Upload completed successfully',
+        data: { total: parsedTotal, created: totalCreated, skipped: skippedCardRows }
       });
     } catch (error) {
       next(error);
@@ -643,10 +652,6 @@ class StockController {
 
         if (cards.count === 0) {
           throw new Error('Card already validated');
-        }
-
-        if (!card.checkpointCode) {
-          throw new Error('Card has no checkpoint assigned and cannot be validated');
         }
 
         const allowed = req.checkpointCodes ?? [];
