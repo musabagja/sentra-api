@@ -85,7 +85,7 @@ model Card {
   id             Int        @id @default(autoincrement())
   name           String?
   key            String     @unique
-  checkpointCode String?
+  checkpointCode String
   status         ItemStatus @default(UNVERIFIED)
   remark         String?
   batchCode      String
@@ -93,7 +93,7 @@ model Card {
   updatedAt      DateTime   @updatedAt
   validatedAt    DateTime?
 
-  checkpoint        Checkpoint?       @relation(fields: [checkpointCode], references: [code])
+  checkpoint        Checkpoint        @relation(fields: [checkpointCode], references: [code])
   uploadBatch       UploadBatch        @relation(fields: [batchCode], references: [code])
   movements         CardMovement[]
   distributionItems DistributionItem[]
