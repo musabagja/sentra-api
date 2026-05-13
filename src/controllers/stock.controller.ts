@@ -477,9 +477,11 @@ class StockController {
 
       const { batchID } = req.body;
       const userCode = req.user.code;
+      const allowed = req.checkpointCodes ?? [];
 
       // Prepare rows without batchCode; batchCode is injected inside the transaction.
       // ICCID rows without a CHECKPOINT column are skipped — cards require a checkpoint.
+      // ICCID rows whose checkpoint is outside the user's circle are also rejected.
       // MSISDN rows may omit CHECKPOINT (numbers are globally accessible).
       let skippedCardRows = 0;
       const preparedSheets = parsedSheets.map(({ sheet, rows }) => {
@@ -488,9 +490,11 @@ class StockController {
           .flatMap((row: any) => {
             const key = String(row.KEY || row.key);
             const rawCheckpoint = row.CHECKPOINT || row.checkpoint;
-            if (sheet === 'ICCID' && !rawCheckpoint) {
-              skippedCardRows++;
-              return [];
+            if (sheet === 'ICCID') {
+              if (!rawCheckpoint || !allowed.includes(String(rawCheckpoint))) {
+                skippedCardRows++;
+                return [];
+              }
             }
             return [{
               key,
