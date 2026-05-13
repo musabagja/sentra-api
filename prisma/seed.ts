@@ -36,7 +36,18 @@ async function main() {
   console.log('✅ Access modules seeded')
 
   //
-  // 3️⃣ USERS
+  // 3️⃣ DEFAULT CIRCLE
+  //
+  const defaultCircle = await prisma.circle.upsert({
+    where: { code: 'DEFAULT' },
+    update: {},
+    create: { name: 'Default Circle', code: 'DEFAULT', status: 'ACTIVE' },
+  })
+
+  console.log('✅ Default circle seeded')
+
+  //
+  // 4️⃣ USERS
   //
   const adminPassword = await bcrypt.hash('admin123', 10)
   const staffPassword = await bcrypt.hash('staff123', 10)
@@ -49,6 +60,7 @@ async function main() {
       code: 'ADMIN',
       phone: '08000000001',
       password: adminPassword,
+      circleCode: defaultCircle.code,
     },
   })
 
@@ -60,13 +72,14 @@ async function main() {
       code: 'STAFF01',
       phone: '08000000002',
       password: staffPassword,
+      circleCode: defaultCircle.code,
     },
   })
 
   console.log('✅ Users seeded')
 
   //
-  // 4️⃣ PERMISSIONS
+  // 5️⃣ PERMISSIONS
   //
   const allAccess = await prisma.access.findMany()
 

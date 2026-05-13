@@ -1,35 +1,56 @@
-model User {
-  id          Int       @id @default(autoincrement())
-  name        String
-  code        String       @unique
-  phone       String       @unique
-  imageURL    String?
-  password    String?
-  createdAt   DateTime @default(now())
 
-  permissions Permission[]
-  accesses    Access[]
-  sessions    Session[]
-  uploadBatches UploadBatch[]
+enum CircleStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model User {
+  id         Int        @id @default(autoincrement())
+  name       String
+  code       String     @unique
+  phone      String     @unique
+  imageURL   String?
+  password   String?
+  status     UserStatus @default(ACTIVE)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  circleCode String
+
+  circle                   Circle                    @relation(fields: [circleCode], references: [code])
+  permissions              Permission[]
+  sessions                 Session[]
+  uploadBatches            UploadBatch[]
+  merges                   Merge[]
+  mergeAdditionals         MergeAdditional[]
+  cardMovements            CardMovement[]
+  numberMovements          NumberMovement[]
+  distributions            Distribution[]
+  distributionSubmittances DistributionSubmittance[]
+  opnames                  Opname[]
+  opnameUpdates            OpnameUpdate[]
 }
 
 model Access {
-  id          Int  @id @default(autoincrement())
+  id          Int      @id @default(autoincrement())
   name        String
   description String?
-  code        String @unique
-  createdAt DateTime @default(now())
+  code        String   @unique
+  createdAt   DateTime @default(now())
 
   permissions Permission[]
-  users       User[]
 }
 
 model Permission {
-  id       Int  @id @default(autoincrement())
+  id         Int      @id @default(autoincrement())
   userCode   String
   accessCode String
-  status   Boolean @default(true)
-  createdAt DateTime @default(now())
+  status     Boolean  @default(true)
+  createdAt  DateTime @default(now())
 
   user   User   @relation(fields: [userCode], references: [code])
   access Access @relation(fields: [accessCode], references: [code])
@@ -43,5 +64,30 @@ model Session {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  user    User   @relation(fields: [userCode], references: [code])
+  user User @relation(fields: [userCode], references: [code])
+
+  @@index([userCode])
+}
+
+model Circle {
+  id        Int          @id @default(autoincrement())
+  name      String
+  code      String       @unique
+  status    CircleStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+
+  users             User[]
+  checkpointCircles CheckpointCircle[]
+}
+
+model CheckpointCircle {
+  id             Int      @id @default(autoincrement())
+  checkpointCode String
+  circleCode     String
+  createdAt      DateTime @default(now())
+
+  checkpoint Checkpoint @relation(fields: [checkpointCode], references: [code])
+  circle     Circle     @relation(fields: [circleCode], references: [code])
+
+  @@unique([checkpointCode, circleCode])
 }

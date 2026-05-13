@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
 import { Prisma } from '../../generated/prisma/client';
+import { hasCheckpointAccess } from '../utils/access.util';
 
 class CheckpointController {
   static async createCheckpoint(req: Request, res: Response, next: NextFunction) {
@@ -8,11 +9,7 @@ class CheckpointController {
       const { code, type, name } = req.body;
 
       const checkpoint = await prisma.checkpoint.create({
-        data: {
-          code,
-          type,
-          name
-        }
+        data: { code, type, name }
       });
 
       res.status(201).json({
@@ -27,31 +24,25 @@ class CheckpointController {
   static async getCheckpoints(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, type, search, startSoldAt, endSoldAt } = req.query;
+      const allowed = req.checkpointCodes ?? [];
 
-      const where: Prisma.CheckpointWhereInput = {};
+      const where: Prisma.CheckpointWhereInput = {
+        // Scope to the checkpoints the user's circle covers
+        code: { in: allowed }
+      };
+
       if (type) {
         where.type = type as any;
       }
 
       if (search) {
         where.OR = [
-          {
-            code: {
-              contains: search as string,
-              mode: 'insensitive'
-            }
-          },
-          {
-            name: {
-              contains: search as string,
-              mode: 'insensitive'
-            }
-          }
-        ]
+          { code: { contains: search as string, mode: 'insensitive' } },
+          { name: { contains: search as string, mode: 'insensitive' } }
+        ];
       }
 
       const includeMerges = !!(startSoldAt || endSoldAt);
-      
       const mergesWhere: any = {};
       if (startSoldAt) {
         mergesWhere.createdAt = {
@@ -68,22 +59,17 @@ class CheckpointController {
       const findManyOptions: any = {
         where,
         skip: (Number(page) - 1) * Number(limit),
+        take: Number(limit),
         include: {
           _count: {
             select: {
               cards: true,
-              merges: includeMerges ? {
-                where: mergesWhere
-              } : true
+              merges: includeMerges ? { where: mergesWhere } : true
             }
           }
         },
         orderBy: { createdAt: 'desc' }
       };
-
-      if (limit) {
-        findManyOptions.take = Number(limit);
-      }
 
       const [checkpoints, total] = await Promise.all([
         prisma.checkpoint.findMany(findManyOptions),
@@ -108,6 +94,7 @@ class CheckpointController {
   static async getCheckpoint(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
 
       const checkpoint = await prisma.checkpoint.findUnique({
         where: { id: Number(id) },
@@ -120,51 +107,27 @@ class CheckpointController {
               }
             }
           },
-          _count: {
-            select: {
-              cards: true
-            }
-          }
+          _count: { select: { cards: true } }
         }
       });
 
-      if (!checkpoint) {
-        throw new Error('Checkpoint not found');
+      if (!checkpoint || !hasCheckpointAccess(checkpoint.code, allowed)) {
+        const err = new Error('Checkpoint not found');
+        (err as any).status = 404;
+        throw err;
       }
 
       const [totalCard, totalSold, totalVerified] = await Promise.all([
-        prisma.card.count({
-          where: {
-            checkpointCode: checkpoint.code
-          }
-        }),
-        prisma.card.count({
-          where: {
-            checkpointCode: checkpoint.code,
-            status: 'SOLD'
-          }
-        }),
-        prisma.card.count({
-          where: {
-            checkpointCode: checkpoint.code,
-            status: 'VERIFIED'
-          }
-        })
+        prisma.card.count({ where: { checkpointCode: checkpoint.code } }),
+        prisma.card.count({ where: { checkpointCode: checkpoint.code, status: 'SOLD' } }),
+        prisma.card.count({ where: { checkpointCode: checkpoint.code, status: 'VERIFIED' } })
       ]);
-
-      if (!checkpoint) {
-        throw new Error('Checkpoint not found');
-      }
 
       res.status(200).json({
         message: 'Checkpoint retrieved successfully',
         data: {
           checkpoint,
-          amount: {
-            card: totalCard,
-            sold: totalSold,
-            verified: totalVerified
-          }
+          amount: { card: totalCard, sold: totalSold, verified: totalVerified }
         }
       });
     } catch (error) {
@@ -176,6 +139,14 @@ class CheckpointController {
     try {
       const { id } = req.params;
       const { code, type, name } = req.body;
+      const allowed = req.checkpointCodes ?? [];
+
+      const existing = await prisma.checkpoint.findUnique({ where: { id: Number(id) } });
+      if (!existing || !hasCheckpointAccess(existing.code, allowed)) {
+        const err = new Error('Checkpoint not found');
+        (err as any).status = 404;
+        throw err;
+      }
 
       const checkpoint = await prisma.checkpoint.update({
         where: { id: Number(id) },
@@ -198,18 +169,22 @@ class CheckpointController {
   static async deleteCheckpoint(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
 
-      await prisma.checkpoint.delete({
-        where: { id: Number(id) }
-      });
+      const existing = await prisma.checkpoint.findUnique({ where: { id: Number(id) } });
+      if (!existing || !hasCheckpointAccess(existing.code, allowed)) {
+        const err = new Error('Checkpoint not found');
+        (err as any).status = 404;
+        throw err;
+      }
 
-      res.status(200).json({
-        message: 'Checkpoint deleted successfully'
-      });
+      await prisma.checkpoint.delete({ where: { id: Number(id) } });
+
+      res.status(200).json({ message: 'Checkpoint deleted successfully' });
     } catch (error) {
       next(error);
     }
   }
 }
 
-export default CheckpointController
+export default CheckpointController;
