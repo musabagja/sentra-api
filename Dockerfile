@@ -5,6 +5,7 @@ COPY package.json pnpm-lock.yaml ./
 COPY prisma ./prisma/
 RUN pnpm install
 COPY . .
+RUN npx prisma generate
 RUN pnpm build
 EXPOSE 5000
 CMD ["node", "dist/server.js"]
