@@ -8,7 +8,7 @@
     "test": "mocha --exit tests/*",
     "dev": "tsx watch src/server.ts",
     "dev:nodemon": "nodemon --watch src --ext ts,json --exec tsx server.ts",
-    "start": "tsx --watch server.ts",
+    "start": "tsx server.ts",
     "build": "tsc",
     "postinstall": "prisma generate"
   },
@@ -28,8 +28,10 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/auto-instrumentations-node": "^0.67.3",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.218.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.208.0",
     "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-logs": "^0.218.0",
     "@opentelemetry/sdk-node": "^0.208.0",
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "@opentelemetry/winston-transport": "^0.27.0",
@@ -56,7 +58,9 @@
       "prisma",
       "@prisma/engines",
       "bcrypt",
-      "esbuild"
+      "esbuild",
+      "protobufjs"
     ]
   }
+  
 }
