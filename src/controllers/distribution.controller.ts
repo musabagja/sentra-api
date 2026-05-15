@@ -436,8 +436,11 @@ class DistributionController {
           })
         ]);
 
-        if (!sourceStock || Number(sourceStock.amount) < itemKeys.length) {
-          throw new Error('Insufficient source stock');
+        const holdCount = await tx.card.count({
+          where: { key: { in: itemKeys }, checkpointCode: distribution.sourceCode, status: 'HOLD' }
+        });
+        if (holdCount !== itemKeys.length) {
+          throw new Error('Some cards are no longer available for distribution');
         }
 
         await Promise.all([
@@ -455,7 +458,7 @@ class DistributionController {
           tx.cardStock.create({
             data: {
               checkpointCode: distribution.sourceCode,
-              amount: Number(sourceStock.amount) - itemKeys.length
+              amount: Number(sourceStock?.amount ?? 0) - itemKeys.length
             }
           }),
           tx.cardStock.create({

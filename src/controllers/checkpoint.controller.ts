@@ -23,7 +23,7 @@ class CheckpointController {
 
   static async getCheckpoints(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, type, search, startSoldAt, endSoldAt } = req.query;
+      const { page = 1, limit, type, search, startSoldAt, endSoldAt } = req.query;
       const allowed = req.checkpointCodes ?? [];
 
       const where: Prisma.CheckpointWhereInput = {
@@ -56,10 +56,14 @@ class CheckpointController {
         };
       }
 
+      const paginated = limit !== undefined;
+
       const findManyOptions: any = {
         where,
-        skip: (Number(page) - 1) * Number(limit),
-        take: Number(limit),
+        ...(paginated && {
+          skip: (Number(page) - 1) * Number(limit),
+          take: Number(limit),
+        }),
         include: {
           _count: {
             select: {
@@ -79,12 +83,14 @@ class CheckpointController {
       res.status(200).json({
         message: 'Checkpoints retrieved successfully',
         data: { checkpoints },
-        pagination: {
-          page: Number(page),
-          limit: Number(limit),
-          total,
-          pages: Math.ceil(total / Number(limit))
-        }
+        ...(paginated && {
+          pagination: {
+            page: Number(page),
+            limit: Number(limit),
+            total,
+            pages: Math.ceil(total / Number(limit))
+          }
+        })
       });
     } catch (error) {
       next(error);
