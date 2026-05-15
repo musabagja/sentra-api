@@ -9,83 +9,86 @@ class StockController {
   static async dashboardSync (req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
-      const excluded: ItemStatus[] = ["UNVERIFIED", "LOST"]
+      const scopeFilter = {
+        status: 'DELIVERED' as const,
+        OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }]
+      };
 
-      const [totalStock, availableStock] = await Promise.all([
-        prisma.card.count({
-          where: { checkpointCode: { in: allowed }, status: { notIn: excluded } }
+      const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards] = await Promise.all([
+        // 1. Cards distributed TO DC checkpoints
+        prisma.distribution.aggregate({
+          _sum: { amount: true },
+          where: { ...scopeFilter, target: { type: 'DC' } }
         }),
+
+        // 2. Cards distributed TO STORE checkpoints
+        prisma.distribution.aggregate({
+          _sum: { amount: true },
+          where: { ...scopeFilter, target: { type: 'STORE' } }
+        }),
+
+        // Shared checkpoint fetch — split into STORE/DC in JS
+        prisma.checkpoint.findMany({
+          where: { code: { in: allowed } },
+          include: { cardStock: { orderBy: { createdAt: 'desc' }, take: 1 } }
+        }),
+
+        // 5a. Base initial stock: VERIFIED + SOLD + HOLD
         prisma.card.count({
-          where: { checkpointCode: { in: allowed }, status: "VERIFIED" }
+          where: { checkpointCode: { in: allowed }, status: { in: ['VERIFIED', 'SOLD', 'HOLD'] } }
+        }),
+
+        // 5b. BROKEN/LOST candidates — need to check if opname-traced
+        prisma.card.findMany({
+          where: { checkpointCode: { in: allowed }, status: { in: ['BROKEN', 'LOST'] } },
+          select: { id: true }
         })
       ]);
 
-      const distributedStock = await prisma.distribution.findMany({
-        where: {
-          status: 'DELIVERED',
-          OR: [
-            { sourceCode: { in: allowed } },
-            { targetCode: { in: allowed } }
-          ],
-          scheduledAt: {
-            gte: new Date(new Date().getFullYear(), 0, 1, 0, 0, 0, 0),
-            lte: new Date(new Date().getFullYear(), 11, 31, 23, 59, 59, 999)
-          },
-          target: { type: { in: ['DC', 'STORE'] } }
-        },
-        include: { target: true }
-      });
+      // Cards that are BROKEN/LOST but discovered via opname still count toward initial stock.
+      // OpnameUpdate.itemID = card.id but no Prisma relation exists, so we resolve in two steps.
+      const brokenLostIds = brokenLostCards.map(c => c.id);
+      const opnamedBrokenLostCount = brokenLostIds.length > 0
+        ? await prisma.opnameUpdate.groupBy({
+            by: ['itemID'],
+            where: { itemID: { in: brokenLostIds } }
+          }).then(groups => groups.length)
+        : 0;
 
-      const storeDistributedStock = distributedStock.filter(d => d.target.type === 'STORE');
-      const warehouseDistributedStock = distributedStock.filter(d => d.target.type === 'DC');
-      const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-      let storeMonthlyCount: Record<string, number> = {}
-      let warehouseMonthlyCount: Record<string, number> = {}
+      const initialStock = baseInitialCount + opnamedBrokenLostCount;
 
-      for (let each of storeDistributedStock) {
-        if (!each.scheduledAt) continue;
-        const monthName = months[each.scheduledAt.getMonth()] as string;
-        storeMonthlyCount[monthName] = (storeMonthlyCount[monthName] ?? 0) + each.amount;
-      }
-      for (let each of warehouseDistributedStock) {
-        if (!each.scheduledAt) continue;
-        const monthName = months[each.scheduledAt.getMonth()] as string;
-        warehouseMonthlyCount[monthName] = (warehouseMonthlyCount[monthName] ?? 0) + each.amount;
-      }
+      // 6. Final stock: sum of latest CardStock per checkpoint
+      //    (already nets out sales, opname BROKEN/LOST, and adjustments)
+      const finalStock = allCheckpoints.reduce(
+        (sum, c) => sum + (c.cardStock[0]?.amount ?? 0), 0
+      );
 
-      const checkpoints = await prisma.checkpoint.findMany({
-        where: { code: { in: allowed }, type: 'STORE' },
-        include: {
-          cardStock: {
-            orderBy: { createdAt: 'desc' },
-            take: 1
-          }
-        },
-        take: 10
-      });
+      const withStock = (c: typeof allCheckpoints[number]) =>
+        ({ ...c, currentStock: c.cardStock[0]?.amount ?? 0 });
 
-      const warehouseDistributions = await prisma.distribution.findMany({
-        where: {
-          OR: [
-            { sourceCode: { in: allowed } },
-            { targetCode: { in: allowed } }
-          ],
-          target: { type: "DC" }
-        },
-        include: { target: true },
-        orderBy: { amount: 'desc' },
-        take: 10
-      });
+      // 3. Top 10 STORE checkpoints with least current stock
+      const topLeastStoreStock = allCheckpoints
+        .filter(c => c.type === 'STORE')
+        .map(withStock)
+        .sort((a, b) => a.currentStock - b.currentStock)
+        .slice(0, 10);
+
+      // 4. Top 10 DC checkpoints with most current stock
+      const topMostDCStock = allCheckpoints
+        .filter(c => c.type === 'DC')
+        .map(withStock)
+        .sort((a, b) => b.currentStock - a.currentStock)
+        .slice(0, 10);
 
       res.status(200).json({
         message: 'Dashboard synced successfully',
         data: {
-          totalStock,
-          availableStock,
-          storeMonthlyCount,
-          warehouseMonthlyCount,
-          checkpoints,
-          warehouseDistributions
+          initialStock,
+          finalStock,
+          distributedToDC: dcAggregate._sum.amount ?? 0,
+          distributedToStore: storeAggregate._sum.amount ?? 0,
+          topLeastStoreStock,
+          topMostDCStock
         }
       });
     } catch (error) {
@@ -115,7 +118,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Batch retrieved successfully',
-        data: batch
+        data: { batch }
       });
     } catch (error) {
       next(error);
@@ -231,7 +234,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Batch updated successfully',
-        data: batch
+        data: { batch }
       });
     } catch (error) {
       (error as any).status = 400;
@@ -722,7 +725,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Card validated successfully',
-        data: card
+        data: { card }
       });
     } catch (error) {
       next(error);
@@ -808,7 +811,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Sims successfully merged',
-        data: results
+        data: { merges: results }
       });
     } catch (error) {
       next(error);
@@ -946,7 +949,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Sim successfully merged',
-        data: sim
+        data: { sim }
       });
     } catch (error) {
       next(error);
@@ -1104,7 +1107,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Number retrieved successfully',
-        data: number
+        data: { number }
       });
     } catch (error) {
       next(error);
@@ -1138,7 +1141,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Number updated successfully',
-        data: number
+        data: { number }
       });
     } catch (error) {
       next(error);
