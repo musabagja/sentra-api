@@ -7,4 +7,4 @@ RUN pnpm install
 COPY . .
 RUN pnpm build
 EXPOSE 5000
-CMD ["sh", "-c", "tsx server.ts"]
+CMD ["node", "dist/server.js"]
