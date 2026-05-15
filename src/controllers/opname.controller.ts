@@ -272,7 +272,7 @@ class OpnameController {
 
       res.status(200).json({
         message: 'Opnames retrieved successfully',
-        data: opnames,
+        data: { opnames },
         pagination: {
           page: Number(page),
           limit: Number(limit),

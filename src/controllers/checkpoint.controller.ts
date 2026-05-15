@@ -14,7 +14,7 @@ class CheckpointController {
 
       res.status(201).json({
         message: 'Checkpoint created successfully',
-        data: checkpoint
+        data: { checkpoint }
       });
     } catch (error) {
       next(error);
@@ -78,7 +78,7 @@ class CheckpointController {
 
       res.status(200).json({
         message: 'Checkpoints retrieved successfully',
-        data: checkpoints,
+        data: { checkpoints },
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -159,7 +159,7 @@ class CheckpointController {
 
       res.status(200).json({
         message: 'Checkpoint updated successfully',
-        data: checkpoint
+        data: { checkpoint }
       });
     } catch (error) {
       next(error);

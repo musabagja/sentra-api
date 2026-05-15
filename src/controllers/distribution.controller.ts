@@ -157,7 +157,7 @@ class DistributionController {
 
       res.status(200).json({
         message: 'Distributions retrieved successfully',
-        data: distributions,
+        data: { distributions },
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -198,7 +198,7 @@ class DistributionController {
 
       res.status(200).json({
         message: 'Distribution retrieved successfully',
-        data: distribution
+        data: { distribution }
       });
     } catch (error) {
       next(error);
@@ -286,7 +286,7 @@ class DistributionController {
 
       res.status(200).json({
         message: 'Distribution updated successfully',
-        data: updatedDistribution
+        data: { distribution: updatedDistribution }
       });
     } catch (error) {
       next(error);
@@ -481,7 +481,7 @@ class DistributionController {
 
       res.status(200).json({
         message: 'Distribution submitted successfully',
-        data: submittance
+        data: { submittance }
       });
     } catch (error) {
       next(error);
