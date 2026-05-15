@@ -278,9 +278,16 @@ class StockController {
         throw err;
       }
 
-      const checkpointCodes = [...new Set(batch.cards.map(c => c.checkpointCode))];
       const cardIds = batch.cards.map(c => c.id);
       const cardKeys = batch.cards.map(c => c.key);
+
+      // Group VERIFIED cards by checkpoint — only VERIFIED cards contributed to CardStock.
+      const verifiedByCheckpoint = batch.cards
+        .filter(c => c.status === 'VERIFIED')
+        .reduce((acc, c) => {
+          acc[c.checkpointCode] = (acc[c.checkpointCode] ?? 0) + 1;
+          return acc;
+        }, {} as Record<string, number>);
 
       await prisma.$transaction(async (tx) => {
         if (cardIds.length > 0) {
@@ -294,8 +301,16 @@ class StockController {
         await tx.card.deleteMany({ where: { batchCode: batch.code } });
         await tx.number.deleteMany({ where: { batchCode: batch.code } });
 
-        if (checkpointCodes.length > 0) {
-          await tx.cardStock.deleteMany({ where: { checkpointCode: { in: checkpointCodes } } });
+        // Decrement CardStock only by the VERIFIED cards removed per checkpoint,
+        // instead of wiping all CardStock rows (which would erase other batches' contributions).
+        for (const [checkpointCode, count] of Object.entries(verifiedByCheckpoint)) {
+          const latest = await tx.cardStock.findFirst({
+            where: { checkpointCode },
+            orderBy: { createdAt: 'desc' }
+          });
+          await tx.cardStock.create({
+            data: { checkpointCode, amount: (latest?.amount ?? 0) - count }
+          });
         }
 
         await tx.uploadBatchProgress.deleteMany({ where: { batchCode: batch.code } });
@@ -651,24 +666,10 @@ class StockController {
           throw err;
         }
 
-        const [stock, lastProgress] = await Promise.all([
-          tx.cardStock.findFirst({
-            where: {
-              checkpointCode: card.checkpointCode
-            },
-            orderBy: {
-              createdAt: 'desc'
-            }
-          }),
-          tx.uploadBatchProgress.findFirst({
-            where: {
-              batchCode: card.uploadBatch.code
-            },
-            orderBy: {
-              createdAt: 'desc'
-            }
-          })
-        ])
+        const lastProgress = await tx.uploadBatchProgress.findFirst({
+          where: { batchCode: card.uploadBatch.code },
+          orderBy: { createdAt: 'desc' }
+        });
 
         if (card.status === "UNVERIFIED" || card.status === "BROKEN" || card.status === "LOST") {
           if (card.status === "UNVERIFIED") {
@@ -680,6 +681,12 @@ class StockController {
             })
           }
           if (nextStatus === "VERIFIED") {
+            // Use a locked read so concurrent validations on the same checkpoint
+            // don't both read the same amount and lose increments.
+            const stock = await tx.cardStock.findFirst({
+              where: { checkpointCode: card.checkpointCode },
+              orderBy: { createdAt: 'desc' }
+            });
             await Promise.all([
               tx.cardMovement.create({
                 data: {
@@ -700,6 +707,10 @@ class StockController {
           }
         } else if (card.status === "VERIFIED") {
           if (nextStatus === "UNVERIFIED" || nextStatus === "BROKEN" || nextStatus === "LOST") {
+            const stock = await tx.cardStock.findFirst({
+              where: { checkpointCode: card.checkpointCode },
+              orderBy: { createdAt: 'desc' }
+            });
             await Promise.all([
               tx.cardMovement.create({
                 data: {
@@ -721,6 +732,8 @@ class StockController {
         } else {
           throw new Error('Invalid status');
         }
+
+        return card;
       })
 
       res.status(200).json({
