@@ -33,6 +33,7 @@ model User {
   distributionSubmittances DistributionSubmittance[]
   opnames                  Opname[]
   opnameUpdates            OpnameUpdate[]
+  opnameSubmittances       OpnameSubmittance[]
 }
 
 model Access {
