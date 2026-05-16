@@ -104,13 +104,13 @@ class StockController {
       const batch = await prisma.uploadBatch.findUnique({
         where: { id: Number(id) },
         include: {
-          cards: true,
-          numbers: true,
-          progress: true
+          cards: { take: 50, orderBy: { createdAt: 'desc' } },
+          numbers: { take: 50, orderBy: { createdAt: 'desc' } },
+          progress: { take: 1, orderBy: { createdAt: 'desc' } }
         }
       });
 
-      if (!batch || !batch.cards.some(c => allowed.includes(c.checkpointCode))) {
+      if (!batch || (batch.cards.length > 0 && !batch.cards.some(c => allowed.includes(c.checkpointCode)))) {
         const err = new Error('Batch not found');
         (err as any).status = 404;
         throw err;
@@ -205,12 +205,18 @@ class StockController {
           include: { cards: { select: { checkpointCode: true } } }
         });
 
-        if (!currentBatch || !currentBatch.cards.some(c => allowed.includes(c.checkpointCode))) {
+        if (!currentBatch || (currentBatch.cards.length > 0 && !currentBatch.cards.some(c => allowed.includes(c.checkpointCode)))) {
           const err = new Error('Batch not found');
           (err as any).status = 404;
           throw err;
         }
-        
+
+        if (currentBatch.status === 'COMPLETED') {
+          const err = new Error('Batch is already completed');
+          (err as any).status = 400;
+          throw err;
+        }
+
         await tx.card.updateMany({
           where: {
             batchCode: currentBatch.code,
@@ -237,7 +243,6 @@ class StockController {
         data: { batch }
       });
     } catch (error) {
-      (error as any).status = 400;
       next(error);
     }
   }
@@ -377,13 +382,9 @@ class StockController {
       ]);
 
       const [totalUpload, totalSold, totalAvailable] = await Promise.all([
-        prisma.card.count(),
-        prisma.card.count({ where: {
-          status: "SOLD"
-        } }),
-        prisma.card.count({ where: {
-          status: "VERIFIED"
-        } })
+        prisma.card.count({ where: { checkpointCode: { in: allowed } } }),
+        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: "SOLD" } }),
+        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: "VERIFIED" } })
       ])
 
       res.status(200).json({
@@ -448,8 +449,17 @@ class StockController {
         throw err;
       }
 
-      await prisma.card.delete({
-        where: { id: Number(id) }
+      if (existing.status === 'SOLD' || existing.status === 'HOLD') {
+        const err = new Error(`Cannot delete a ${existing.status.toLowerCase()} card`);
+        (err as any).status = 400;
+        throw err;
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.cardMovement.deleteMany({ where: { cardID: existing.id } });
+        await tx.merge.deleteMany({ where: { cardKey: existing.key } });
+        await tx.distributionItem.deleteMany({ where: { itemKey: existing.key } });
+        await tx.card.delete({ where: { id: existing.id } });
       });
 
       res.status(200).json({
@@ -610,12 +620,9 @@ class StockController {
           throw new Error('User not found');
         }
 
-        if (!rawStatus || rawStatus === "UNVERIFIED") {
-          throw new Error ("Please provide status, wether it's VERIFIED or BROKEN");
-        }
-
-        if (!(Object.values(ItemStatus) as string[]).includes(rawStatus)) {
-          throw new Error('Invalid status');
+        const validTargetStatuses = ['VERIFIED', 'BROKEN'];
+        if (!rawStatus || !validTargetStatuses.includes(rawStatus)) {
+          throw new Error("Please provide status, either 'VERIFIED' or 'BROKEN'");
         }
 
         const nextStatus = rawStatus as ItemStatus;
@@ -623,17 +630,20 @@ class StockController {
           status: nextStatus
         };
 
-        const card = await tx.card.findFirst({
-          where: {
-            key: key as string
-          },
-          include: {
-            uploadBatch: true
-          }
+        const card = await tx.card.findUnique({
+          where: { key: key as string },
+          include: { uploadBatch: true }
         });
 
         if (!card) {
           throw new Error('Card not found');
+        }
+
+        const allowed = req.checkpointCodes ?? [];
+        if (!hasCheckpointAccess(card.checkpointCode, allowed)) {
+          const err = new Error('Card not found');
+          (err as any).status = 404;
+          throw err;
         }
 
         if (!card.uploadBatch) {
@@ -647,24 +657,11 @@ class StockController {
         if (card.status === "UNVERIFIED") {
           updateData.validatedAt = new Date();
         }
-  
-        const cards = await tx.card.updateMany({
-          where: {
-            key: key as string
-          },
+
+        await tx.card.update({
+          where: { key: key as string },
           data: updateData
         });
-
-        if (cards.count === 0) {
-          throw new Error('Card already validated');
-        }
-
-        const allowed = req.checkpointCodes ?? [];
-        if (!hasCheckpointAccess(card.checkpointCode, allowed)) {
-          const err = new Error('Card not found');
-          (err as any).status = 404;
-          throw err;
-        }
 
         const lastProgress = await tx.uploadBatchProgress.findFirst({
           where: { batchCode: card.uploadBatch.code },
@@ -852,55 +849,25 @@ class StockController {
         const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
         if (!checkpoint) throw new Error('Checkpoint not found');
 
-        let number
         if (type === "SIMCARD" || type === "ESIM") {
-          [number] = await Promise.all([
-            tx.number.findUnique({
-              where: {
-                key: numberKey,
-                status: "VERIFIED"
-              }
-            }),
-            tx.number.update({
-              where: {
-                key: numberKey
-              },
-              data: {
-                status: 'SOLD'
-              }
-            })
-          ]);
+          const number = await tx.number.findUnique({ where: { key: numberKey, status: "VERIFIED" } });
           if (!number) {
             throw new Error('Number not found');
           }
           if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
             throw new Error('Number checkpoint code does not match checkpoint code');
           }
+          await tx.number.update({ where: { key: numberKey }, data: { status: 'SOLD' } });
         }
-        let card
         if (type === "SIMCARD") {
-          [card] = await Promise.all([
-            tx.card.findUnique({
-              where: {
-                key: cardKey,
-                status: "VERIFIED"
-              }
-            }),
-            tx.card.update({
-              where: {
-                key: cardKey
-              },
-              data: {
-                status: 'SOLD'
-              }
-            }),
-          ])
+          const card = await tx.card.findUnique({ where: { key: cardKey, status: "VERIFIED" } });
           if (!card) {
             throw new Error('Card not found');
           }
-          if (checkpoint.code !== card?.checkpointCode) {
+          if (checkpoint.code !== card.checkpointCode) {
             throw new Error('Checkpoint code does not match card checkpoint code');
           }
+          await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
           const stock = await tx.cardStock.findFirst({
             where: {
               checkpointCode: card.checkpointCode
@@ -1039,35 +1006,36 @@ class StockController {
             checkpoint: true,
             merge: true
           },
-          orderBy: { createdAt: 'desc' }
+          orderBy: { createdAt: sort === 'ASC' ? 'asc' : 'desc' }
         }),
         prisma.number.count({ where })
       ]);
 
-      const [totalUpload, totalAvailable] = await Promise.all([
-        prisma.number.count(),
-        prisma.number.count({
+      const numberAmountWhere = {
+        OR: [
+          { checkpointCode: { in: checkpointFilter } },
+          { checkpointCode: null }
+        ]
+      };
+      const mergeAmountWhere = { checkpointCode: { in: allowed } };
+
+      const [totalUpload, totalAvailable, totalMerge, monthlyMerge, dailyMerge] = await Promise.all([
+        prisma.number.count({ where: numberAmountWhere }),
+        prisma.number.count({ where: { ...numberAmountWhere, status: "VERIFIED" } }),
+        prisma.merge.count({ where: mergeAmountWhere }),
+        prisma.merge.count({
           where: {
-            status: "VERIFIED"
+            ...mergeAmountWhere,
+            createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
+          }
+        }),
+        prisma.merge.count({
+          where: {
+            ...mergeAmountWhere,
+            createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }
           }
         })
-      ])
-
-      const totalMerge = await prisma.merge.count();
-      const monthlyMerge = await prisma.merge.count({
-        where: {
-          createdAt: {
-            gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-          }
-        }
-      });
-      const dailyMerge = await prisma.merge.count({
-        where: {
-          createdAt: {
-            gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())
-          }
-        }
-      });
+      ]);
 
       res.status(200).json({
         message: 'Numbers retrieved successfully',
@@ -1204,30 +1172,22 @@ class StockController {
           lte: new Date(new Date(endSoldAt as string).setHours(23, 59, 59, 999))
         }
       }
-      if (cardRemark) {
-        where.number = {
-          remark: cardRemark as string
-        }
+      const isSimcardQuery = type === "SIMCARD" || !type;
+      if (cardRemark && isSimcardQuery) {
+        where.number = { remark: cardRemark as string };
       }
-      if (search) {
-        where.number = {
-          ...where.number,
-          key: {
-            contains: search as string
-          }
-        }
+      if (search && isSimcardQuery) {
+        where.number = { ...where.number, key: { contains: search as string } };
       }
       let merges
 
-      if (type === "SIMCARD" || !type) {
+      if (isSimcardQuery) {
         merges = await prisma.merge.findMany({
           skip: (Number(page) - 1) * Number(limit),
           take: Number(limit),
           orderBy: { createdAt: 'desc' },
           where,
-          include: {
-            number: true
-          }
+          include: { number: true }
         });
       } else {
         merges = await prisma.mergeAdditional.findMany({
@@ -1257,17 +1217,13 @@ class StockController {
         message: 'Merges retrieved successfully',
         data: {
           merges,
-          amount: {
-            total,
-            monthly,
-            daily
-          },
-          pagination: {
-            page: Number(page),
-            limit: Number(limit),
-            total,
-            pages: Math.ceil(total / Number(limit))
-          }
+          amount: { total, monthly, daily }
+        },
+        pagination: {
+          page: Number(page),
+          limit: Number(limit),
+          total,
+          pages: Math.ceil(total / Number(limit))
         }
       });
     } catch (error) {
