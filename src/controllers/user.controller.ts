@@ -15,12 +15,26 @@ const cookieOptions = (maxAge: number) => ({
   signed: isProduction
 });
 
+// clearCookie must match the security options used when the cookie was set,
+// otherwise some browsers (especially with SameSite=None + Secure) ignore the clear.
+const clearOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax'
+};
+
 class UserController {
   static async signIn(req: Request, res: Response, next: NextFunction) {
     try {
       const { code, password } = req.body;
 
-      const user = await prisma.user.findFirst({
+      if (!code || !password) {
+        const err = new Error('code and password are required');
+        (err as any).status = 400;
+        throw err;
+      }
+
+      const user = await prisma.user.findUnique({
         where: { code },
         include: {
           permissions: {
@@ -35,7 +49,13 @@ class UserController {
         throw err;
       }
 
-      if (!Bcrypt.compare(password, user.password as string)) {
+      if (user.status !== 'ACTIVE') {
+        const err = new Error('This account is inactive.');
+        (err as any).status = 401;
+        throw err;
+      }
+
+      if (!user.password || !Bcrypt.compare(password, user.password)) {
         const err = new Error('Invalid password.');
         (err as any).status = 401;
         throw err;
@@ -87,14 +107,24 @@ class UserController {
         throw err;
       }
 
-      const decoded = JWT.verify(refreshToken) as { session: string };
+      let decoded: { session: string };
+      try {
+        decoded = JWT.verify(refreshToken) as { session: string };
+      } catch {
+        res.clearCookie('refresh_token', clearOptions);
+        res.clearCookie('access_token', clearOptions);
+        const err = new Error('Session expired, please sign in again.');
+        (err as any).status = 401;
+        throw err;
+      }
 
       const session = await prisma.session.findFirst({
         where: { id: decoded.session }
       });
 
       if (!session) {
-        res.clearCookie('refresh_token');
+        res.clearCookie('refresh_token', clearOptions);
+        res.clearCookie('access_token', clearOptions);
         const err = new Error('Session expired, please sign in again.');
         (err as any).status = 401;
         throw err;
@@ -102,18 +132,20 @@ class UserController {
 
       if (session.expiresAt < new Date()) {
         await prisma.session.delete({ where: { id: session.id } });
-        res.clearCookie('refresh_token');
+        res.clearCookie('refresh_token', clearOptions);
+        res.clearCookie('access_token', clearOptions);
         const err = new Error('Session expired, please sign in again.');
         (err as any).status = 401;
         throw err;
       }
 
-      const user = await prisma.user.findFirst({
+      const user = await prisma.user.findUnique({
         where: { code: session.userCode }
       });
 
-      if (!user) {
-        res.clearCookie('refresh_token');
+      if (!user || user.status !== 'ACTIVE') {
+        res.clearCookie('refresh_token', clearOptions);
+        res.clearCookie('access_token', clearOptions);
         const err = new Error('Session expired, please sign in again.');
         (err as any).status = 401;
         throw err;
@@ -157,12 +189,18 @@ class UserController {
         throw err;
       }
 
-      const decoded = JWT.verify(refreshToken) as { session: string };
+      // Best-effort session deletion: clear cookies regardless of token/session state
+      try {
+        const decoded = JWT.verify(refreshToken) as { session: string };
+        // deleteMany avoids a P2025 crash if the session was already deleted
+        // (e.g. signed out on another device)
+        await prisma.session.deleteMany({ where: { id: decoded.session } });
+      } catch {
+        // Token is expired or tampered — nothing to delete, proceed to clear cookies
+      }
 
-      await prisma.session.delete({ where: { id: decoded.session } });
-
-      res.clearCookie('refresh_token');
-      res.clearCookie('access_token');
+      res.clearCookie('refresh_token', clearOptions);
+      res.clearCookie('access_token', clearOptions);
 
       res.status(200).json({ message: 'Sign-out successful' });
     } catch (error) {
