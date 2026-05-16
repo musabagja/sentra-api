@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import prisma from "../../lib/prisma";
+import { OpnameConditionStatus } from "../../generated/prisma/enums";
 import { hasCheckpointAccess, resolveCheckpointFilter } from "../utils/access.util";
 
 class OpnameController {
@@ -8,6 +9,13 @@ class OpnameController {
       const { id } = req.params;
       const { status, cardKey } = req.body;
 
+      const validStatuses: OpnameConditionStatus[] = ["OK", "BROKEN", "LOST"];
+      if (!status || !validStatuses.includes(status)) {
+        const err = new Error(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+        (err as any).status = 400;
+        throw err;
+      }
+
       const allowed = req.checkpointCodes ?? [];
 
       const updatedOpname = await prisma.$transaction(async (tx) => {
@@ -15,7 +23,7 @@ class OpnameController {
           tx.opname.findUnique({ where: { id: Number(id) } }),
           tx.card.findUnique({ where: { key: cardKey } })
         ]);
-  
+
         if (!opname || !hasCheckpointAccess(opname.checkpointCode, allowed)) {
           const err = new Error('Opname not found');
           (err as any).status = 404;
@@ -25,79 +33,83 @@ class OpnameController {
         if (opname.status !== "ONGOING") {
           throw new Error('Opname is not running');
         }
-  
+
         if (!card) {
           throw new Error('Card not found');
         }
-  
+
         if (card.status === "SOLD") {
           throw new Error('Card is sold');
         }
-  
+
         if (card.status === "UNVERIFIED") {
           throw new Error('Card is not verified');
         }
-  
+
         if (card.checkpointCode !== opname.checkpointCode) {
           throw new Error('Card is not at the same checkpoint as the opname');
         }
-  
+
+        // Prevent duplicate scans of the same card within this opname
+        const existingUpdate = await tx.opnameUpdate.findFirst({
+          where: { opnameID: Number(id), itemID: card.id }
+        });
+        if (existingUpdate) {
+          throw new Error('Card has already been scanned in this opname');
+        }
+
         const [opnameProgresses, cardStock] = await Promise.all([
           tx.opnameUpdate.findMany({
-            where: {
-              opnameID: Number(id)
-            }
+            where: { opnameID: Number(id) },
+            select: { itemID: true }
           }),
           tx.cardStock.findFirst({
-            where: { checkpointCode: card.checkpointCode },
+            where: { checkpointCode: opname.checkpointCode },
             orderBy: { createdAt: 'desc' }
           })
-        ])
+        ]);
 
         if (!cardStock) {
           throw new Error('Card stock not found');
         }
 
-        if (cardStock.amount <= 0) {
-          throw new Error('Card stock amount is zero');
-        }
-  
-        const totalProgress = [...new Set(opnameProgresses.map(update => update.itemID))];
-  
+        // Count unique cards scanned so far; the new card (not yet inserted) adds 1
+        const uniqueScannedCount = new Set(opnameProgresses.map(u => u.itemID)).size;
+
         await tx.opnameUpdate.create({
           data: {
             itemID: card.id,
-            status: status === "VERIFIED" ? "OK" : status,
+            status,
             opnameID: Number(id),
             userCode: req.user!.code
           }
         });
 
-        if (card.status === "VERIFIED") {
-          if (status !== "VERIFIED") {
-            await tx.cardStock.create({
-              data: {
-                amount: cardStock?.amount - 1,
-                checkpointCode: card.checkpointCode
-              }
-            });
-          }
-        } else {
-          if (status === "VERIFIED") {
-            await tx.cardStock.create({
-              data: {
-                amount: cardStock?.amount + 1,
-                checkpointCode: card.checkpointCode
-              }
-            });
-          }
+        // Adjust stock only when the physical state differs from the system state.
+        // card.status is the system truth; status is the physical observation.
+        if (card.status === "VERIFIED" && (status === "BROKEN" || status === "LOST")) {
+          // Physically missing/broken but system says VERIFIED → decrement
+          await tx.cardStock.create({
+            data: {
+              amount: cardStock.amount - 1,
+              checkpointCode: opname.checkpointCode
+            }
+          });
+        } else if (card.status !== "VERIFIED" && status === "OK") {
+          // Physically present and OK but system says not VERIFIED → increment
+          await tx.cardStock.create({
+            data: {
+              amount: cardStock.amount + 1,
+              checkpointCode: opname.checkpointCode
+            }
+          });
         }
 
         return await tx.opname.update({
           where: { id: Number(id) },
-          data: { progress: totalProgress.length }
+          data: { progress: uniqueScannedCount + 1 }
         });
-      })
+      });
 
       res.status(200).json({
         message: 'Opname progress updated successfully',
@@ -173,7 +185,8 @@ class OpnameController {
         }
   
         const amount = cardStock.amount;
-        const batch = lastOpname && lastOpname.batch ? (Number(lastOpname.batch.split('/')[2]) + 1).toString() : `OP/${checkpointCode}/1`;
+        const nextBatchNum = lastOpname?.batch ? Number(lastOpname.batch.split('/')[2]) + 1 : 1;
+        const batch = `OP/${checkpointCode}/${nextBatchNum}`;
   
         const opname = await tx.opname.create({
           data: {
@@ -217,6 +230,12 @@ class OpnameController {
         throw err;
       }
 
+      if (existing.status !== "ONGOING") {
+        const err = new Error('Opname is not running');
+        (err as any).status = 400;
+        throw err;
+      }
+
       const opname = await prisma.opname.update({
         where: {
           id: Number(id)
@@ -254,10 +273,8 @@ class OpnameController {
           take: Number(limit),
           include: {
             updates: {
-              include: {
-                opname: true
-              },
-              take: 10
+              take: 10,
+              orderBy: { createdAt: 'desc' }
             },
             _count: {
               select: {
@@ -294,9 +311,6 @@ class OpnameController {
         where: { id: Number(id) },
         include: {
           updates: {
-            include: {
-              opname: true
-            },
             orderBy: { createdAt: 'desc' }
           }
         }
@@ -324,6 +338,13 @@ class OpnameController {
       const { id } = req.params;
       const { status } = req.body;
       const allowed = req.checkpointCodes ?? [];
+
+      const validStatuses = ["ONGOING", "COMPLETED", "CANCELLED"];
+      if (!status || !validStatuses.includes(status)) {
+        const err = new Error(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+        (err as any).status = 400;
+        throw err;
+      }
 
       const existing = await prisma.opname.findUnique({ where: { id: Number(id) } });
       if (!existing || !hasCheckpointAccess(existing.checkpointCode, allowed)) {
