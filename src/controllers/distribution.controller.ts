@@ -127,8 +127,12 @@ class DistributionController {
         }]
       };
       if (status) where.status = status;
-      if (startDueDate) where.scheduledAt = { gte: new Date(startDueDate as string) };
-      if (endDueDate) where.scheduledAt = { lte: new Date(endDueDate as string) };
+      if (startDueDate || endDueDate) {
+        where.scheduledAt = {
+          ...(startDueDate && { gte: new Date(startDueDate as string) }),
+          ...(endDueDate && { lte: new Date(endDueDate as string) })
+        };
+      }
 
       const [distributions, total] = await Promise.all([
         prisma.distribution.findMany({
@@ -221,9 +225,9 @@ class DistributionController {
           throw new Error('Status is required');
         }
 
-        const allowedStatuses = ["SCHEDULED", "HOLD", "DELIVERED"];
+        const allowedStatuses = ["SCHEDULED", "HOLD"];
         if (!allowedStatuses.includes(status)) {
-          throw new Error('Invalid distribution status');
+          throw new Error('Invalid distribution status. Use the submit endpoint to mark as delivered, or the cancel endpoint to cancel');
         }
 
         const distribution = await tx.distribution.findUnique({
@@ -392,6 +396,31 @@ class DistributionController {
           throw new Error('Distribution is already completed');
         }
 
+        const itemKeys = distribution.items.map(item => item.itemKey);
+
+        // Validate before writing — if cards are gone the transaction rolls back cleanly
+        const [holdCount, sourceStock, targetStock] = await Promise.all([
+          tx.card.count({
+            where: { key: { in: itemKeys }, checkpointCode: distribution.sourceCode, status: 'HOLD' }
+          }),
+          tx.cardStock.findFirst({
+            where: { checkpointCode: distribution.sourceCode },
+            orderBy: { createdAt: 'desc' }
+          }),
+          tx.cardStock.findFirst({
+            where: { checkpointCode: distribution.targetCode },
+            orderBy: { createdAt: 'desc' }
+          })
+        ]);
+
+        if (holdCount !== itemKeys.length) {
+          throw new Error('Some cards are no longer available for distribution');
+        }
+
+        if (!sourceStock) {
+          throw new Error('Source checkpoint has no stock record');
+        }
+
         const submittance = await tx.distributionSubmittance.create({
           data: {
             distributionID: Number(id),
@@ -415,34 +444,6 @@ class DistributionController {
           }
         });
 
-        const itemKeys = distribution.items.map(item => item.itemKey);
-  
-        const [sourceStock, targetStock] = await Promise.all([
-          tx.cardStock.findFirst({
-            where: {
-              checkpointCode: distribution.sourceCode
-            },
-            orderBy: {
-              createdAt: 'desc'
-            }
-          }),
-          tx.cardStock.findFirst({
-            where: {
-              checkpointCode: distribution.targetCode
-            },
-            orderBy: {
-              createdAt: 'desc'
-            }
-          })
-        ]);
-
-        const holdCount = await tx.card.count({
-          where: { key: { in: itemKeys }, checkpointCode: distribution.sourceCode, status: 'HOLD' }
-        });
-        if (holdCount !== itemKeys.length) {
-          throw new Error('Some cards are no longer available for distribution');
-        }
-
         await Promise.all([
           tx.card.updateMany({
             where: {
@@ -458,13 +459,13 @@ class DistributionController {
           tx.cardStock.create({
             data: {
               checkpointCode: distribution.sourceCode,
-              amount: Number(sourceStock?.amount ?? 0) - itemKeys.length
+              amount: sourceStock.amount - itemKeys.length
             }
           }),
           tx.cardStock.create({
             data: {
               checkpointCode: distribution.targetCode,
-              amount: Number(targetStock?.amount || 0) + itemKeys.length
+              amount: (targetStock?.amount ?? 0) + itemKeys.length
             }
           }),
           tx.cardMovement.createMany({
@@ -496,7 +497,10 @@ class DistributionController {
       const { id } = req.params;
       const allowed = req.checkpointCodes ?? [];
 
-      const existing = await prisma.distribution.findUnique({ where: { id: Number(id) } });
+      const existing = await prisma.distribution.findUnique({
+        where: { id: Number(id) },
+        include: { items: true }
+      });
       if (
         !existing ||
         (!hasCheckpointAccess(existing.sourceCode, allowed) &&
@@ -507,8 +511,28 @@ class DistributionController {
         throw err;
       }
 
-      await prisma.distribution.delete({
-        where: { id: Number(id) }
+      if (existing.status === 'DELIVERED') {
+        const err = new Error('Cannot delete a delivered distribution');
+        (err as any).status = 400;
+        throw err;
+      }
+
+      const itemKeys = existing.items.map(i => i.itemKey);
+
+      await prisma.$transaction(async (tx) => {
+        // Restore HOLD cards back to VERIFIED
+        if (itemKeys.length > 0) {
+          await tx.card.updateMany({
+            where: { key: { in: itemKeys }, status: 'HOLD' },
+            data: { status: 'VERIFIED' }
+          });
+          await tx.distributionItem.deleteMany({ where: { distributionID: existing.id } });
+        }
+
+        // Remove submittance if it exists (CANCELLED distributions shouldn't have one, but guard anyway)
+        await tx.distributionSubmittance.deleteMany({ where: { distributionID: existing.id } });
+
+        await tx.distribution.delete({ where: { id: existing.id } });
       });
 
       res.status(200).json({
