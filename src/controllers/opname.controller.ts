@@ -222,6 +222,12 @@ class OpnameController {
     try {
       const { id } = req.params;
       const allowed = req.checkpointCodes ?? [];
+      const { signURL, picSignURL, documentationURL } = req.body;
+
+      // documentationURL may be a single string or an array (2 files max)
+      const documentationURLs: string[] = Array.isArray(documentationURL)
+        ? documentationURL
+        : documentationURL ? [documentationURL] : [];
 
       const existing = await prisma.opname.findUnique({ where: { id: Number(id) } });
       if (!existing || !hasCheckpointAccess(existing.checkpointCode, allowed)) {
@@ -236,19 +242,39 @@ class OpnameController {
         throw err;
       }
 
-      const opname = await prisma.opname.update({
-        where: {
-          id: Number(id)
-        },
-        data: {
-          status: "COMPLETED"
-        }
+      const result = await prisma.$transaction(async (tx) => {
+        const opname = await tx.opname.update({
+          where: { id: Number(id) },
+          data: { status: "COMPLETED" }
+        });
+
+        const submittance = await tx.opnameSubmittance.create({
+          data: {
+            opnameID: Number(id),
+            userCode: req.user!.code,
+            signURL: signURL || null,
+            picSignURL: picSignURL || null,
+            ...(documentationURLs.length > 0 && {
+              documentations: {
+                createMany: {
+                  data: documentationURLs.map(url => ({ url }))
+                }
+              }
+            })
+          },
+          include: {
+            documentations: true
+          }
+        });
+
+        return { opname, submittance };
       });
 
       res.status(200).json({
         message: 'Opname closed successfully',
         data: {
-          opname
+          opname: result.opname,
+          submittance: result.submittance
         }
       });
     } catch (error) {
@@ -275,6 +301,9 @@ class OpnameController {
             updates: {
               take: 10,
               orderBy: { createdAt: 'desc' }
+            },
+            submittance: {
+              include: { documentations: true }
             },
             _count: {
               select: {
@@ -312,6 +341,9 @@ class OpnameController {
         include: {
           updates: {
             orderBy: { createdAt: 'desc' }
+          },
+          submittance: {
+            include: { documentations: true }
           }
         }
       });

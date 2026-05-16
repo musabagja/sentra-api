@@ -58,30 +58,26 @@ const upload = (type: 'xlsx' | 'image') => multer({
   },
 });
 
-// Middleware to generate URLs for uploaded images and attach to req.body
+// Middleware to generate URLs for uploaded images and attach to req.body.
+// Single-file fields produce a string; multi-file fields produce an array.
+// "File" suffix is stripped and replaced with "URL" (signFile → signURL).
 export const generateImageURLs = (req: Request, res: any, next: any) => {
   const files = req.files as { [fieldname: string]: Express.Multer.File[] };
 
   if (files) {
     Object.keys(files).forEach(fieldname => {
       const fileArray = files[fieldname];
-      if (fileArray && fileArray.length > 0) {
-        const file = fileArray[0];
-        if (file) {
-          const url = `/uploads/${file.originalname}`;
+      if (!fileArray || fileArray.length === 0) return;
 
-          // Strip "File" suffix and replace with "URL"
-          // imageFile -> imageURL, signFile -> signURL, avatarFile -> avatarURL
-          const urlKey = fieldname.endsWith("File")
-            ? `${fieldname.slice(0, -4)}URL`
-            : `${fieldname}URL`;
+      const urlKey = fieldname.endsWith("File")
+        ? `${fieldname.slice(0, -4)}URL`
+        : `${fieldname}URL`;
 
-          (req.body as any)[urlKey] = url;
-        }
-      }
+      const urls = fileArray.map(f => `/uploads/${f.originalname}`);
+      (req.body as any)[urlKey] = urls.length === 1 ? urls[0] : urls;
     });
   }
-  
+
   next();
 };
 

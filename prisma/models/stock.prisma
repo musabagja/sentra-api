@@ -327,6 +327,30 @@ model Opname {
 
   updates OpnameUpdate[]
   user    User           @relation(fields: [userCode], references: [code])
+  submittance OpnameSubmittance?
+}
+
+model OpnameSubmittance {
+  id         Int         @id @default(autoincrement())
+  opnameID   Int         @unique
+  userCode   String
+  signURL    String?
+  picSignURL String?
+  documentationURL String?
+  createdAt  DateTime           @default(now())
+
+  opname Opname @relation(fields: [opnameID], references: [id])
+  documentations OpnameSubmittanceDocumentation[]
+  user   User   @relation(fields: [userCode], references: [code])
+}
+
+model OpnameSubmittanceDocumentation {
+  id            Int         @id @default(autoincrement())
+  submittanceID Int
+  url           String
+  createdAt     DateTime    @default(now())
+
+  submittance OpnameSubmittance @relation(fields: [submittanceID], references: [id])
 }
 
 model OpnameUpdate {
