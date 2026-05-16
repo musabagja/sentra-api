@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
 import { Prisma } from '../../generated/prisma/client';
+import { CheckpointType } from '../../generated/prisma/enums';
 import { hasCheckpointAccess } from '../utils/access.util';
 
 class CheckpointController {
@@ -8,8 +9,30 @@ class CheckpointController {
     try {
       const { code, type, name } = req.body;
 
-      const checkpoint = await prisma.checkpoint.create({
-        data: { code, type, name }
+      if (!code || !type || !name) {
+        const err = new Error('code, type, and name are required');
+        (err as any).status = 400;
+        throw err;
+      }
+
+      const validTypes = Object.values(CheckpointType);
+      if (!validTypes.includes(type)) {
+        const err = new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
+        (err as any).status = 400;
+        throw err;
+      }
+
+      const checkpoint = await prisma.$transaction(async (tx) => {
+        const checkpoint = await tx.checkpoint.create({
+          data: { code, type, name }
+        });
+
+        // Link the new checkpoint to the creator's circle so it's immediately visible
+        await tx.checkpointCircle.create({
+          data: { checkpointCode: code, circleCode: req.user!.circleCode }
+        });
+
+        return checkpoint;
       });
 
       res.status(201).json({
@@ -106,12 +129,12 @@ class CheckpointController {
         where: { id: Number(id) },
         include: {
           cards: {
-            include: {
-              movements: {
-                orderBy: { createdAt: 'desc' },
-                take: 5
-              }
-            }
+            take: 20,
+            orderBy: { createdAt: 'desc' }
+          },
+          cardStock: {
+            take: 1,
+            orderBy: { createdAt: 'desc' }
           },
           _count: { select: { cards: true } }
         }
@@ -144,8 +167,17 @@ class CheckpointController {
   static async updateCheckpoint(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
-      const { code, type, name } = req.body;
+      const { type, name } = req.body;
       const allowed = req.checkpointCodes ?? [];
+
+      if (type) {
+        const validTypes = Object.values(CheckpointType);
+        if (!validTypes.includes(type)) {
+          const err = new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
+          (err as any).status = 400;
+          throw err;
+        }
+      }
 
       const existing = await prisma.checkpoint.findUnique({ where: { id: Number(id) } });
       if (!existing || !hasCheckpointAccess(existing.code, allowed)) {
@@ -157,7 +189,6 @@ class CheckpointController {
       const checkpoint = await prisma.checkpoint.update({
         where: { id: Number(id) },
         data: {
-          ...(code && { code }),
           ...(type && { type }),
           ...(name && { name })
         }
@@ -184,7 +215,32 @@ class CheckpointController {
         throw err;
       }
 
-      await prisma.checkpoint.delete({ where: { id: Number(id) } });
+      const [cardCount, distributionCount] = await Promise.all([
+        prisma.card.count({ where: { checkpointCode: existing.code } }),
+        prisma.distribution.count({
+          where: {
+            OR: [{ sourceCode: existing.code }, { targetCode: existing.code }]
+          }
+        })
+      ]);
+
+      if (cardCount > 0) {
+        const err = new Error(`Cannot delete checkpoint: ${cardCount} card(s) are assigned to it`);
+        (err as any).status = 400;
+        throw err;
+      }
+
+      if (distributionCount > 0) {
+        const err = new Error(`Cannot delete checkpoint: ${distributionCount} distribution(s) reference it`);
+        (err as any).status = 400;
+        throw err;
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.cardStock.deleteMany({ where: { checkpointCode: existing.code } });
+        await tx.checkpointCircle.deleteMany({ where: { checkpointCode: existing.code } });
+        await tx.checkpoint.delete({ where: { id: existing.id } });
+      });
 
       res.status(200).json({ message: 'Checkpoint deleted successfully' });
     } catch (error) {
