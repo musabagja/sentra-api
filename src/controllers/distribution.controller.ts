@@ -117,21 +117,29 @@ class DistributionController {
       const { page = 1, limit = 10, status, sourceCode, targetCode, startDueDate, endDueDate } = req.query;
       const allowed = req.checkpointCodes ?? [];
 
-      // A user sees distributions where they own either end (source or target)
+      // Base access scope: user sees distributions where they own either end (source or target).
+      // Specific filters are AND-appended on top — kept separate so they don't collapse into
+      // an OR that returns results matching only one side when both filters are provided.
       const where: any = {
-        AND: [{
-          OR: [
-            { sourceCode: { in: resolveCheckpointFilter(sourceCode as string | undefined, allowed) } },
-            { targetCode: { in: resolveCheckpointFilter(targetCode as string | undefined, allowed) } }
-          ]
-        }]
+        AND: [
+          {
+            OR: [
+              { sourceCode: { in: allowed } },
+              { targetCode: { in: allowed } }
+            ]
+          }
+        ]
       };
-      if (status) where.status = status;
+      if (status) where.AND.push({ status });
+      if (sourceCode) where.AND.push({ sourceCode: sourceCode as string });
+      if (targetCode) where.AND.push({ targetCode: targetCode as string });
       if (startDueDate || endDueDate) {
-        where.scheduledAt = {
-          ...(startDueDate && { gte: new Date(startDueDate as string) }),
-          ...(endDueDate && { lte: new Date(endDueDate as string) })
-        };
+        where.AND.push({
+          scheduledAt: {
+            ...(startDueDate && { gte: new Date(startDueDate as string) }),
+            ...(endDueDate && { lte: new Date(endDueDate as string) })
+          }
+        });
       }
 
       const [distributions, total] = await Promise.all([
