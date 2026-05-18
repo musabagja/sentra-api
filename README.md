@@ -476,10 +476,12 @@ Creates one distribution per source checkpoint represented in the card selection
 | `page` | number | Default `1` |
 | `limit` | number | Default `10` |
 | `status` | `SCHEDULED \| HOLD \| DELIVERED \| CANCELLED` | Filter by status |
-| `sourceCode` | string | Filter by source checkpoint |
-| `targetCode` | string | Filter by target checkpoint |
+| `sourceCode` | string | Filter by source checkpoint. When combined with `targetCode`, both must match (AND, not OR) |
+| `targetCode` | string | Filter by target checkpoint. When combined with `sourceCode`, both must match (AND, not OR) |
 | `startDueDate` | ISO date | Scheduled-at range start |
 | `endDueDate` | ISO date | Scheduled-at range end |
+
+Results are scoped to distributions where the authenticated user's circle owns at least one end (source or target).
 
 **Response** `200` — `{ data: { distributions }, pagination }` with `source`, `target`, `items` (first 5), and `_count`.
 
