@@ -38,14 +38,14 @@ router.post('/numbers', StockController.createNumber);
 // GET /api/stock/numbers - Get all numbers with pagination and filtering
 router.get('/numbers', StockController.getNumbers);
 
-// GET /api/stock/numbers/:id - Get a specific number by ID
-router.get('/numbers/:id', StockController.getNumber);
+// GET /api/stock/numbers/:key - Get a specific number by key
+router.get('/numbers/:key', StockController.getNumber);
 
-// PUT /api/stock/numbers/:id - Update a specific number
-router.put('/numbers/:id', StockController.updateNumber);
+// PUT /api/stock/numbers/:key - Update a specific number
+router.put('/numbers/:key', StockController.updateNumber);
 
-// DELETE /api/stock/numbers/:id - Delete a specific number
-router.delete('/numbers/:id', StockController.deleteNumber);
+// DELETE /api/stock/numbers/:key - Delete a specific number
+router.delete('/numbers/:key', StockController.deleteNumber);
 
 // POST /api/upload/xlsx - Upload bunch of cards from Excel file
 router.post('/upload/xlsx', upload('xlsx').single('source'), StockController.uploadExcel);

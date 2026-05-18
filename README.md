@@ -135,7 +135,7 @@ Returns aggregated stock overview for the user's circle.
 
 #### `GET /api/stock/batches/:id`
 
-**Response** `200` — `{ data: { batch } }` with `cards`, `numbers`, `progress` included.
+**Response** `200` — `{ data: { batch } }` with up to 50 most recent `cards` and `numbers`, and the latest `progress` snapshot.
 
 ---
 
@@ -154,7 +154,7 @@ Marks remaining UNVERIFIED cards as LOST and closes the batch.
 
 #### `DELETE /api/stock/batches/:id`
 
-Deletes a batch and all its cards/numbers. Only allowed on `ONGOING` batches with no SOLD cards.
+Deletes a batch and all its cards/numbers. Only allowed on `ONGOING` batches with no `SOLD` or `HOLD` cards.
 
 **Response** `200` — `{ message: "Batch deleted successfully" }`
 
@@ -188,6 +188,8 @@ Deletes a batch and all its cards/numbers. Only allowed on `ONGOING` batches wit
 ---
 
 #### `DELETE /api/stock/cards/:key`
+
+Not allowed on `SOLD` or `HOLD` cards.
 
 **Response** `200` — `{ message: "Card deleted successfully" }`
 
@@ -247,13 +249,13 @@ Excel sheets: `ICCID` (columns: `KEY`, `CHECKPOINT`, `REMARK`) and `MSISDN` (col
 
 ---
 
-#### `GET /api/stock/numbers/:id`
+#### `GET /api/stock/numbers/:key`
 
 **Response** `200` — `{ data: { number } }` with `checkpoint` and `movements`.
 
 ---
 
-#### `PUT /api/stock/numbers/:id`
+#### `PUT /api/stock/numbers/:key`
 
 **Body** *(all optional)*
 ```json
@@ -264,7 +266,7 @@ Excel sheets: `ICCID` (columns: `KEY`, `CHECKPOINT`, `REMARK`) and `MSISDN` (col
 
 ---
 
-#### `DELETE /api/stock/numbers/:id`
+#### `DELETE /api/stock/numbers/:key`
 
 **Response** `200` — `{ message: "Number deleted successfully" }`
 
@@ -281,13 +283,13 @@ Excel sheets: `ICCID` (columns: `KEY`, `CHECKPOINT`, `REMARK`) and `MSISDN` (col
 | `page` | number | Default `1` |
 | `limit` | number | Default `10` |
 | `checkpointCode` | string | Filter by checkpoint |
-| `type` | `SIMCARD \| ESIM \| CPP \| MIGRATION` | Merge type |
+| `type` | `SIMCARD \| ESIM \| CPP \| MIGRATION` | Merge type. Defaults to `SIMCARD` |
 | `startSoldAt` | `YYYY-MM-DD` | Start of sale date range |
 | `endSoldAt` | `YYYY-MM-DD` | End of sale date range |
-| `search` | string | Search by number key |
-| `cardRemark` | string | Filter by number remark |
+| `search` | string | Search by number key. Only applies when `type` is `SIMCARD` or omitted |
+| `cardRemark` | string | Filter by number remark. Only applies when `type` is `SIMCARD` or omitted |
 
-**Response** `200` — `{ data: { merges, amount: { total, monthly, daily } } }`
+**Response** `200` — `{ data: { merges, amount: { total, monthly, daily } }, pagination }`
 
 ---
 
