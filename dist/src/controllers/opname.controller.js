@@ -1,53 +1,91 @@
-import prisma from "../../lib/prisma";
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const prisma_1 = __importDefault(require("../../lib/prisma"));
+const access_util_1 = require("../utils/access.util");
 class OpnameController {
     static async updateOpnameProgress(req, res, next) {
         try {
             const { id } = req.params;
             const { status, cardKey } = req.body;
-            if (!req.user) {
-                throw new Error('User not found');
-            }
-            const opname = await prisma.opname.findUnique({
-                where: { id: Number(id) }
-            });
-            if (!opname) {
-                throw new Error('Opname not found');
-            }
-            if (opname.status !== "RUNNING") {
-                throw new Error('Opname is not running');
-            }
-            const card = await prisma.card.findUnique({
-                where: { key: cardKey }
-            });
-            if (!card) {
-                throw new Error('Card not found');
-            }
-            if (card.status === "SOLD") {
-                throw new Error('Card is sold');
-            }
-            if (card.status === "UNVERIFIED") {
-                throw new Error('Card is not verified');
-            }
-            if (card.checkpointCode !== opname.checkpointCode) {
-                throw new Error('Card is not at the same checkpoint as the opname');
-            }
-            const opnameProgresses = await prisma.opnameUpdate.findMany({
-                where: {
-                    opnameID: Number(id)
+            const allowed = req.checkpointCodes ?? [];
+            const updatedOpname = await prisma_1.default.$transaction(async (tx) => {
+                const [opname, card] = await Promise.all([
+                    tx.opname.findUnique({ where: { id: Number(id) } }),
+                    tx.card.findUnique({ where: { key: cardKey } })
+                ]);
+                if (!opname || !(0, access_util_1.hasCheckpointAccess)(opname.checkpointCode, allowed)) {
+                    const err = new Error('Opname not found');
+                    err.status = 404;
+                    throw err;
                 }
-            });
-            const totalProgress = [...new Set(opnameProgresses.map(update => update.itemID))];
-            const updatedOpname = await prisma.opname.update({
-                where: { id: Number(id) },
-                data: { progress: totalProgress.length }
-            });
-            await prisma.opnameUpdate.create({
-                data: {
-                    itemID: card.id,
-                    status,
-                    opnameID: Number(id),
-                    userCode: req.user.code
+                if (opname.status !== "ONGOING") {
+                    throw new Error('Opname is not running');
                 }
+                if (!card) {
+                    throw new Error('Card not found');
+                }
+                if (card.status === "SOLD") {
+                    throw new Error('Card is sold');
+                }
+                if (card.status === "UNVERIFIED") {
+                    throw new Error('Card is not verified');
+                }
+                if (card.checkpointCode !== opname.checkpointCode) {
+                    throw new Error('Card is not at the same checkpoint as the opname');
+                }
+                const [opnameProgresses, cardStock] = await Promise.all([
+                    tx.opnameUpdate.findMany({
+                        where: {
+                            opnameID: Number(id)
+                        }
+                    }),
+                    tx.cardStock.findFirst({
+                        where: { checkpointCode: card.checkpointCode },
+                        orderBy: { createdAt: 'desc' }
+                    })
+                ]);
+                if (!cardStock) {
+                    throw new Error('Card stock not found');
+                }
+                if (cardStock.amount <= 0) {
+                    throw new Error('Card stock amount is zero');
+                }
+                const totalProgress = [...new Set(opnameProgresses.map(update => update.itemID))];
+                await tx.opnameUpdate.create({
+                    data: {
+                        itemID: card.id,
+                        status: status === "VERIFIED" ? "OK" : status,
+                        opnameID: Number(id),
+                        userCode: req.user.code
+                    }
+                });
+                if (card.status === "VERIFIED") {
+                    if (status !== "VERIFIED") {
+                        await tx.cardStock.create({
+                            data: {
+                                amount: cardStock?.amount - 1,
+                                checkpointCode: card.checkpointCode
+                            }
+                        });
+                    }
+                }
+                else {
+                    if (status === "VERIFIED") {
+                        await tx.cardStock.create({
+                            data: {
+                                amount: cardStock?.amount + 1,
+                                checkpointCode: card.checkpointCode
+                            }
+                        });
+                    }
+                }
+                return await tx.opname.update({
+                    where: { id: Number(id) },
+                    data: { progress: totalProgress.length }
+                });
             });
             res.status(200).json({
                 message: 'Opname progress updated successfully',
@@ -66,10 +104,13 @@ class OpnameController {
     static async createOpname(req, res, next) {
         try {
             const { checkpointCode } = req.body;
-            const opname = await prisma.$transaction(async (tx) => {
-                if (!req.user) {
-                    throw new Error('User not found');
-                }
+            const allowed = req.checkpointCodes ?? [];
+            if (!(0, access_util_1.hasCheckpointAccess)(checkpointCode, allowed)) {
+                const err = new Error('Checkpoint not found');
+                err.status = 404;
+                throw err;
+            }
+            const opname = await prisma_1.default.$transaction(async (tx) => {
                 const checkpoint = await tx.checkpoint.findUnique({
                     where: {
                         code: checkpointCode
@@ -81,7 +122,7 @@ class OpnameController {
                 const runningOpname = await tx.opname.findFirst({
                     where: {
                         checkpointCode: checkpointCode,
-                        status: "RUNNING"
+                        status: "ONGOING"
                     },
                     orderBy: {
                         createdAt: 'desc'
@@ -118,7 +159,7 @@ class OpnameController {
                         batch,
                         type: "ICCID",
                         checkpointCode,
-                        status: "RUNNING",
+                        status: "ONGOING",
                         userCode: req.user.code
                     },
                     include: {
@@ -138,16 +179,46 @@ class OpnameController {
             next(error);
         }
     }
+    static async closeOpname(req, res, next) {
+        try {
+            const { id } = req.params;
+            const allowed = req.checkpointCodes ?? [];
+            const existing = await prisma_1.default.opname.findUnique({ where: { id: Number(id) } });
+            if (!existing || !(0, access_util_1.hasCheckpointAccess)(existing.checkpointCode, allowed)) {
+                const err = new Error('Opname not found');
+                err.status = 404;
+                throw err;
+            }
+            const opname = await prisma_1.default.opname.update({
+                where: {
+                    id: Number(id)
+                },
+                data: {
+                    status: "COMPLETED"
+                }
+            });
+            res.status(200).json({
+                message: 'Opname closed successfully',
+                data: {
+                    opname
+                }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
     static async getOpnames(req, res, next) {
         try {
             const { page = 1, limit = 10, checkpointCode, type } = req.query;
-            const where = {};
-            if (checkpointCode)
-                where.checkpointCode = checkpointCode;
+            const allowed = req.checkpointCodes ?? [];
+            const where = {
+                checkpointCode: { in: (0, access_util_1.resolveCheckpointFilter)(checkpointCode, allowed) }
+            };
             if (type)
                 where.type = type;
             const [opnames, total] = await Promise.all([
-                prisma.opname.findMany({
+                prisma_1.default.opname.findMany({
                     where,
                     skip: (Number(page) - 1) * Number(limit),
                     take: Number(limit),
@@ -166,11 +237,11 @@ class OpnameController {
                     },
                     orderBy: { createdAt: 'desc' }
                 }),
-                prisma.opname.count({ where })
+                prisma_1.default.opname.count({ where })
             ]);
             res.status(200).json({
                 message: 'Opnames retrieved successfully',
-                data: opnames,
+                data: { opnames },
                 pagination: {
                     page: Number(page),
                     limit: Number(limit),
@@ -186,7 +257,8 @@ class OpnameController {
     static async getOpname(req, res, next) {
         try {
             const { id } = req.params;
-            const opname = await prisma.opname.findUnique({
+            const allowed = req.checkpointCodes ?? [];
+            const opname = await prisma_1.default.opname.findUnique({
                 where: { id: Number(id) },
                 include: {
                     updates: {
@@ -197,8 +269,10 @@ class OpnameController {
                     }
                 }
             });
-            if (!opname) {
-                throw new Error('Opname not found');
+            if (!opname || !(0, access_util_1.hasCheckpointAccess)(opname.checkpointCode, allowed)) {
+                const err = new Error('Opname not found');
+                err.status = 404;
+                throw err;
             }
             res.status(200).json({
                 message: 'Opname retrieved successfully',
@@ -215,7 +289,14 @@ class OpnameController {
         try {
             const { id } = req.params;
             const { status } = req.body;
-            const opname = await prisma.opname.update({
+            const allowed = req.checkpointCodes ?? [];
+            const existing = await prisma_1.default.opname.findUnique({ where: { id: Number(id) } });
+            if (!existing || !(0, access_util_1.hasCheckpointAccess)(existing.checkpointCode, allowed)) {
+                const err = new Error('Opname not found');
+                err.status = 404;
+                throw err;
+            }
+            const opname = await prisma_1.default.opname.update({
                 where: { id: Number(id) },
                 data: {
                     status
@@ -238,7 +319,14 @@ class OpnameController {
     static async deleteOpname(req, res, next) {
         try {
             const { id } = req.params;
-            await prisma.opname.delete({
+            const allowed = req.checkpointCodes ?? [];
+            const existing = await prisma_1.default.opname.findUnique({ where: { id: Number(id) } });
+            if (!existing || !(0, access_util_1.hasCheckpointAccess)(existing.checkpointCode, allowed)) {
+                const err = new Error('Opname not found');
+                err.status = 404;
+                throw err;
+            }
+            await prisma_1.default.opname.delete({
                 where: { id: Number(id) }
             });
             res.status(200).json({
@@ -250,4 +338,4 @@ class OpnameController {
         }
     }
 }
-export default OpnameController;
+exports.default = OpnameController;
