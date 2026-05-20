@@ -1,65 +1,56 @@
-import prisma from '../../lib/prisma';
-import Bcrypt from '../utils/bcrypt.util';
-import JWT from '../utils/jwt.util';
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const prisma_1 = __importDefault(require("../../lib/prisma"));
+const bcrypt_util_1 = __importDefault(require("../utils/bcrypt.util"));
+const jwt_util_1 = __importDefault(require("../utils/jwt.util"));
 const isProduction = process.env.NODE_ENV === "production";
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const cookieOptions = (maxAge) => ({
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: (isProduction ? 'none' : 'lax'),
+    maxAge,
+    signed: isProduction
+});
 class UserController {
     static async signIn(req, res, next) {
         try {
             const { code, password } = req.body;
-            const user = await prisma.user.findFirst({
-                where: {
-                    code
-                },
+            const user = await prisma_1.default.user.findFirst({
+                where: { code },
                 include: {
                     permissions: {
-                        include: {
-                            access: true
-                        }
+                        include: { access: true }
                     }
                 }
             });
             if (!user) {
-                throw new Error('This code is not registered to any user.');
+                const err = new Error('This code is not registered to any user.');
+                err.status = 401;
+                throw err;
             }
-            if (!Bcrypt.compare(password, user.password)) {
-                throw new Error('Invalid password.');
+            if (!bcrypt_util_1.default.compare(password, user.password)) {
+                const err = new Error('Invalid password.');
+                err.status = 401;
+                throw err;
             }
-            const [session] = await Promise.all([prisma.session.create({
+            // Atomically rotate sessions: delete all existing, create fresh one
+            const session = await prisma_1.default.$transaction(async (tx) => {
+                await tx.session.deleteMany({ where: { userCode: user.code } });
+                return tx.session.create({
                     data: {
                         userCode: user.code,
-                        expiresAt: new Date(Date.now() + (7 * 24 * 60 * 60 * 1000))
+                        expiresAt: new Date(Date.now() + SESSION_TTL_MS)
                     }
-                }), prisma.session.deleteMany({
-                    where: {
-                        userCode: user.code
-                    }
-                })]);
-            const refreshToken = JWT.sign({
-                session: session.id
-            }, {
-                expiresIn: '7d'
+                });
             });
-            const accessToken = JWT.sign({
-                id: user.id,
-                name: user.name,
-                code: user.code
-            }, {
-                expiresIn: '15m'
-            });
-            res.cookie('access_token', accessToken, {
-                httpOnly: true,
-                secure: isProduction,
-                sameSite: isProduction ? 'none' : 'lax',
-                maxAge: 15 * 60 * 1000,
-                signed: isProduction ? true : false
-            });
-            res.cookie('refresh_token', refreshToken, {
-                httpOnly: true,
-                secure: isProduction,
-                sameSite: isProduction ? 'none' : 'lax',
-                maxAge: 7 * 24 * 60 * 60 * 1000,
-                signed: isProduction ? true : false
-            });
+            const refreshToken = jwt_util_1.default.sign({ session: session.id }, { expiresIn: '7d' });
+            const accessToken = jwt_util_1.default.sign({ id: user.id, name: user.name, code: user.code }, { expiresIn: '15m' });
+            res.cookie('access_token', accessToken, cookieOptions(15 * 60 * 1000));
+            res.cookie('refresh_token', refreshToken, cookieOptions(SESSION_TTL_MS));
             res.status(200).json({
                 message: 'Sign-in successful',
                 data: {
@@ -76,69 +67,55 @@ class UserController {
     }
     static async refreshToken(req, res, next) {
         try {
-            const refreshToken = isProduction ? req.signedCookies["refresh_token"] : req.cookies["refresh_token"];
+            const refreshToken = isProduction
+                ? req.signedCookies["refresh_token"]
+                : req.cookies["refresh_token"];
             if (!refreshToken) {
-                throw new Error('Session expired, please sign in again.');
+                const err = new Error('Session expired, please sign in again.');
+                err.status = 401;
+                throw err;
             }
-            const decoded = JWT.verify(refreshToken);
-            const session = await prisma.session.findFirst({
-                where: {
-                    id: decoded.session
-                }
+            const decoded = jwt_util_1.default.verify(refreshToken);
+            const session = await prisma_1.default.session.findFirst({
+                where: { id: decoded.session }
             });
             if (!session) {
                 res.clearCookie('refresh_token');
-                throw new Error('Session expired, please sign in again.');
+                const err = new Error('Session expired, please sign in again.');
+                err.status = 401;
+                throw err;
             }
-            const user = await prisma.user.findFirst({
-                where: {
-                    code: session.userCode
-                }
+            if (session.expiresAt < new Date()) {
+                await prisma_1.default.session.delete({ where: { id: session.id } });
+                res.clearCookie('refresh_token');
+                const err = new Error('Session expired, please sign in again.');
+                err.status = 401;
+                throw err;
+            }
+            const user = await prisma_1.default.user.findFirst({
+                where: { code: session.userCode }
             });
             if (!user) {
                 res.clearCookie('refresh_token');
-                throw new Error('Session expired, please sign in again.');
+                const err = new Error('Session expired, please sign in again.');
+                err.status = 401;
+                throw err;
             }
-            await prisma.session.delete({
-                where: {
-                    id: session.id
-                }
+            // Atomically rotate the session
+            const newSession = await prisma_1.default.$transaction(async (tx) => {
+                await tx.session.delete({ where: { id: session.id } });
+                return tx.session.create({
+                    data: {
+                        userCode: session.userCode,
+                        expiresAt: new Date(Date.now() + SESSION_TTL_MS)
+                    }
+                });
             });
-            const newSession = await prisma.session.create({
-                data: {
-                    userCode: session.userCode,
-                    expiresAt: new Date(Date.now() + (7 * 24 * 60 * 60 * 1000))
-                }
-            });
-            const newRefreshToken = JWT.sign({
-                session: newSession.id
-            }, {
-                expiresIn: '7d'
-            });
-            const newAccessToken = JWT.sign({
-                id: user.id,
-                name: user.name,
-                code: user.code
-            }, {
-                expiresIn: '15m'
-            });
-            res.cookie('refresh_token', newRefreshToken, {
-                httpOnly: true,
-                secure: isProduction,
-                sameSite: isProduction ? 'none' : 'lax',
-                maxAge: 7 * 24 * 60 * 60 * 1000,
-                signed: isProduction ? true : false
-            });
-            res.cookie('access_token', newAccessToken, {
-                httpOnly: true,
-                secure: isProduction,
-                sameSite: isProduction ? 'none' : 'lax',
-                maxAge: 15 * 60 * 1000,
-                signed: isProduction ? true : false
-            });
-            res.status(200).json({
-                message: 'Refresh token successful'
-            });
+            const newRefreshToken = jwt_util_1.default.sign({ session: newSession.id }, { expiresIn: '7d' });
+            const newAccessToken = jwt_util_1.default.sign({ id: user.id, name: user.name, code: user.code }, { expiresIn: '15m' });
+            res.cookie('refresh_token', newRefreshToken, cookieOptions(SESSION_TTL_MS));
+            res.cookie('access_token', newAccessToken, cookieOptions(15 * 60 * 1000));
+            res.status(200).json({ message: 'Refresh token successful' });
         }
         catch (error) {
             next(error);
@@ -146,25 +123,23 @@ class UserController {
     }
     static async signOut(req, res, next) {
         try {
-            const refreshToken = req.signedCookies.refresh_token;
+            const refreshToken = isProduction
+                ? req.signedCookies["refresh_token"]
+                : req.cookies["refresh_token"];
             if (!refreshToken) {
-                throw new Error('Session already signed out.');
+                const err = new Error('Session already signed out.');
+                err.status = 400;
+                throw err;
             }
-            const decoded = JWT.verify(refreshToken);
-            await prisma.session.delete({
-                where: {
-                    id: decoded.session
-                }
-            });
+            const decoded = jwt_util_1.default.verify(refreshToken);
+            await prisma_1.default.session.delete({ where: { id: decoded.session } });
             res.clearCookie('refresh_token');
             res.clearCookie('access_token');
-            res.status(200).json({
-                message: 'Sign-out successful'
-            });
+            res.status(200).json({ message: 'Sign-out successful' });
         }
         catch (error) {
             next(error);
         }
     }
 }
-export default UserController;
+exports.default = UserController;

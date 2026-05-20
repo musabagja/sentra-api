@@ -14,7 +14,7 @@ class StockController {
         OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }]
       };
 
-      const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards] = await Promise.all([
+      const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards, topSaleByUser] = await Promise.all([
         // 1. Cards distributed TO DC checkpoints
         prisma.distribution.aggregate({
           _sum: { amount: true },
@@ -42,18 +42,52 @@ class StockController {
         prisma.card.findMany({
           where: { checkpointCode: { in: allowed }, status: { in: ['BROKEN', 'LOST'] } },
           select: { id: true }
+        }),
+
+        // Top 10 users by total sales (merges) within scope
+        prisma.merge.groupBy({
+          by: ['userCode'],
+          where: { checkpointCode: { in: allowed } },
+          _count: { userCode: true },
+          orderBy: { _count: { userCode: 'desc' } },
+          take: 10
         })
       ]);
+
+      const storeCheckpointCodes = allCheckpoints
+        .filter(c => c.type === 'STORE')
+        .map(c => c.code);
 
       // Cards that are BROKEN/LOST but discovered via opname still count toward initial stock.
       // OpnameUpdate.itemID = card.id but no Prisma relation exists, so we resolve in two steps.
       const brokenLostIds = brokenLostCards.map(c => c.id);
-      const opnamedBrokenLostCount = brokenLostIds.length > 0
-        ? await prisma.opnameUpdate.groupBy({
-            by: ['itemID'],
-            where: { itemID: { in: brokenLostIds } }
-          }).then(groups => groups.length)
-        : 0;
+      const [opnamedBrokenLostCount, topSaleByCheckpoint] = await Promise.all([
+        brokenLostIds.length > 0
+          ? prisma.opnameUpdate.groupBy({
+              by: ['itemID'],
+              where: { itemID: { in: brokenLostIds } }
+            }).then(groups => groups.length)
+          : Promise.resolve(0),
+
+        // Top 10 STORE checkpoints by total sales (merges)
+        prisma.merge.groupBy({
+          by: ['checkpointCode'],
+          where: { checkpointCode: { in: storeCheckpointCodes } },
+          _count: { checkpointCode: true },
+          orderBy: { _count: { checkpointCode: 'desc' } },
+          take: 10
+        })
+      ]);
+
+      // Enrich top-selling users with their name
+      const topUserCodes = topSaleByUser.map(r => r.userCode);
+      const topUserDetails = topUserCodes.length > 0
+        ? await prisma.user.findMany({
+            where: { code: { in: topUserCodes } },
+            select: { code: true, name: true }
+          })
+        : [];
+      const userDetailMap = Object.fromEntries(topUserDetails.map(u => [u.code, u]));
 
       const initialStock = baseInitialCount + opnamedBrokenLostCount;
 
@@ -80,6 +114,20 @@ class StockController {
         .sort((a, b) => b.currentStock - a.currentStock)
         .slice(0, 10);
 
+      const checkpointMap = Object.fromEntries(allCheckpoints.map(c => [c.code, c]));
+
+      // Top 10 STORE checkpoints ranked by highest sales
+      const topHighestSaleByCheckpoint = topSaleByCheckpoint.map(row => ({
+        checkpoint: checkpointMap[row.checkpointCode!],
+        totalSales: row._count.checkpointCode
+      }));
+
+      // Top 10 users ranked by highest sales
+      const topHighestSaleByUser = topSaleByUser.map(row => ({
+        user: userDetailMap[row.userCode] ?? { code: row.userCode, name: null },
+        totalSales: row._count.userCode
+      }));
+
       res.status(200).json({
         message: 'Dashboard synced successfully',
         data: {
@@ -88,7 +136,9 @@ class StockController {
           distributedToDC: dcAggregate._sum.amount ?? 0,
           distributedToStore: storeAggregate._sum.amount ?? 0,
           topLeastStoreStock,
-          topMostDCStock
+          topMostDCStock,
+          topHighestSaleByCheckpoint,
+          topHighestSaleByUser
         }
       });
     } catch (error) {

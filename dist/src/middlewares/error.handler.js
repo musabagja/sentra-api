@@ -1,8 +1,9 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
 const errorHandler = (error, req, res, next) => {
-    console.log(error);
-    res.status(500).json({
-        message: 'Internal server error',
-        error: error.message
+    const status = error.status || 500;
+    res.status(status).json({
+        message: error.message || 'Internal server error',
     });
 };
-export default errorHandler;
+exports.default = errorHandler;

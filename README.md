@@ -109,10 +109,21 @@ Returns aggregated stock overview for the user's circle.
     "distributedToDC": 1200,
     "distributedToStore": 800,
     "topLeastStoreStock": [...],
-    "topMostDCStock": [...]
+    "topMostDCStock": [...],
+    "topHighestSaleByCheckpoint": [
+      { "checkpoint": { "code": "STORE001", "name": "Store A", "type": "STORE" }, "totalSales": 320 }
+    ],
+    "topHighestSaleByUser": [
+      { "user": { "code": "USR001", "name": "John Doe" }, "totalSales": 150 }
+    ]
   }
 }
 ```
+
+| Field | Description |
+|---|---|
+| `topHighestSaleByCheckpoint` | Top 10 STORE checkpoints ranked by total SIMCARD sales (merges), descending |
+| `topHighestSaleByUser` | Top 10 users ranked by total SIMCARD sales across all scoped checkpoints, descending |
 
 ---
 

@@ -1,29 +1,304 @@
-import prisma from '../../lib/prisma';
-import * as xlsx from 'xlsx';
-import { ItemStatus } from '../../generated/prisma/enums';
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const prisma_1 = __importDefault(require("../../lib/prisma"));
+const xlsx = __importStar(require("xlsx"));
+const enums_1 = require("../../generated/prisma/enums");
+const access_util_1 = require("../utils/access.util");
 class StockController {
-    // ============================================================================
-    // CARD CRUD OPERATIONS
-    // ============================================================================
-    static async createCard(req, res, next) {
+    static async dashboardSync(req, res, next) {
         try {
-            // const { name, key, checkpointCode, status, remark } = req.body;
-            // const card = await prisma.card.create({
-            //   data: {
-            //     name,
-            //     key,
-            //     checkpointCode,
-            //     status: status || 'VERIFIED',
-            //     remark
-            //   },
-            //   include: {
-            //     checkpoint: true
-            //   }
-            // });
-            // res.status(201).json({
-            //   message: 'Card created successfully',
-            //   data: card
-            // });
+            const allowed = req.checkpointCodes ?? [];
+            const scopeFilter = {
+                status: 'DELIVERED',
+                OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }]
+            };
+            const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards] = await Promise.all([
+                // 1. Cards distributed TO DC checkpoints
+                prisma_1.default.distribution.aggregate({
+                    _sum: { amount: true },
+                    where: { ...scopeFilter, target: { type: 'DC' } }
+                }),
+                // 2. Cards distributed TO STORE checkpoints
+                prisma_1.default.distribution.aggregate({
+                    _sum: { amount: true },
+                    where: { ...scopeFilter, target: { type: 'STORE' } }
+                }),
+                // Shared checkpoint fetch — split into STORE/DC in JS
+                prisma_1.default.checkpoint.findMany({
+                    where: { code: { in: allowed } },
+                    include: { cardStock: { orderBy: { createdAt: 'desc' }, take: 1 } }
+                }),
+                // 5a. Base initial stock: VERIFIED + SOLD + HOLD
+                prisma_1.default.card.count({
+                    where: { checkpointCode: { in: allowed }, status: { in: ['VERIFIED', 'SOLD', 'HOLD'] } }
+                }),
+                // 5b. BROKEN/LOST candidates — need to check if opname-traced
+                prisma_1.default.card.findMany({
+                    where: { checkpointCode: { in: allowed }, status: { in: ['BROKEN', 'LOST'] } },
+                    select: { id: true }
+                })
+            ]);
+            // Cards that are BROKEN/LOST but discovered via opname still count toward initial stock.
+            // OpnameUpdate.itemID = card.id but no Prisma relation exists, so we resolve in two steps.
+            const brokenLostIds = brokenLostCards.map(c => c.id);
+            const opnamedBrokenLostCount = brokenLostIds.length > 0
+                ? await prisma_1.default.opnameUpdate.groupBy({
+                    by: ['itemID'],
+                    where: { itemID: { in: brokenLostIds } }
+                }).then(groups => groups.length)
+                : 0;
+            const initialStock = baseInitialCount + opnamedBrokenLostCount;
+            // 6. Final stock: sum of latest CardStock per checkpoint
+            //    (already nets out sales, opname BROKEN/LOST, and adjustments)
+            const finalStock = allCheckpoints.reduce((sum, c) => sum + (c.cardStock[0]?.amount ?? 0), 0);
+            const withStock = (c) => ({ ...c, currentStock: c.cardStock[0]?.amount ?? 0 });
+            // 3. Top 10 STORE checkpoints with least current stock
+            const topLeastStoreStock = allCheckpoints
+                .filter(c => c.type === 'STORE')
+                .map(withStock)
+                .sort((a, b) => a.currentStock - b.currentStock)
+                .slice(0, 10);
+            // 4. Top 10 DC checkpoints with most current stock
+            const topMostDCStock = allCheckpoints
+                .filter(c => c.type === 'DC')
+                .map(withStock)
+                .sort((a, b) => b.currentStock - a.currentStock)
+                .slice(0, 10);
+            res.status(200).json({
+                message: 'Dashboard synced successfully',
+                data: {
+                    initialStock,
+                    finalStock,
+                    distributedToDC: dcAggregate._sum.amount ?? 0,
+                    distributedToStore: storeAggregate._sum.amount ?? 0,
+                    topLeastStoreStock,
+                    topMostDCStock
+                }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    static async getBatch(req, res, next) {
+        try {
+            const { id } = req.params;
+            const allowed = req.checkpointCodes ?? [];
+            const batch = await prisma_1.default.uploadBatch.findUnique({
+                where: { id: Number(id) },
+                include: {
+                    cards: true,
+                    numbers: true,
+                    progress: true
+                }
+            });
+            if (!batch || !batch.cards.some(c => allowed.includes(c.checkpointCode))) {
+                const err = new Error('Batch not found');
+                err.status = 404;
+                throw err;
+            }
+            res.status(200).json({
+                message: 'Batch retrieved successfully',
+                data: { batch }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    static async getBatches(req, res, next) {
+        try {
+            const { page = 1, limit = 10, status, search } = req.query;
+            const allowed = req.checkpointCodes ?? [];
+            const allowedStatus = ['ONGOING', 'COMPLETED'];
+            if (status && !allowedStatus.includes(status)) {
+                throw new Error('Invalid status');
+            }
+            const where = {
+                cards: { some: { checkpointCode: { in: allowed } } }
+            };
+            if (status) {
+                where.status = status;
+            }
+            if (search) {
+                where.OR = [
+                    { code: { contains: search, mode: 'insensitive' } },
+                    { name: { contains: search, mode: 'insensitive' } }
+                ];
+            }
+            const batches = await prisma_1.default.uploadBatch.findMany({
+                take: Number(limit),
+                skip: (Number(page) - 1) * Number(limit),
+                where,
+                orderBy: { createdAt: 'desc' },
+                include: {
+                    progress: {
+                        take: 1,
+                        orderBy: { createdAt: 'desc' }
+                    }
+                }
+            });
+            const excluded = ["UNVERIFIED", "LOST"];
+            const [totalBatch, totalCards, totalVerified] = await Promise.all([
+                prisma_1.default.uploadBatch.count({ where }),
+                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed } } }),
+                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: { notIn: excluded } } })
+            ]);
+            const totalUnverified = totalCards - totalVerified;
+            res.status(200).json({
+                message: 'Cards retrieved successfully',
+                data: {
+                    batches,
+                    amount: {
+                        totalBatch,
+                        totalCards,
+                        totalVerified,
+                        totalUnverified
+                    }
+                },
+                pagination: {
+                    page: Number(page),
+                    limit: Number(limit),
+                    total: Number(totalBatch),
+                    pages: Math.ceil(Number(totalBatch) / Number(limit))
+                }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    static async completeBatch(req, res, next) {
+        try {
+            const { id } = req.params;
+            const { note } = req.body;
+            const allowed = req.checkpointCodes ?? [];
+            const batch = await prisma_1.default.$transaction(async (tx) => {
+                const currentBatch = await tx.uploadBatch.findUnique({
+                    where: { id: Number(id) },
+                    include: { cards: { select: { checkpointCode: true } } }
+                });
+                if (!currentBatch || !currentBatch.cards.some(c => allowed.includes(c.checkpointCode))) {
+                    const err = new Error('Batch not found');
+                    err.status = 404;
+                    throw err;
+                }
+                await tx.card.updateMany({
+                    where: {
+                        batchCode: currentBatch.code,
+                        status: "UNVERIFIED"
+                    },
+                    data: {
+                        status: "LOST"
+                    }
+                });
+                return await tx.uploadBatch.update({
+                    where: {
+                        id: Number(id)
+                    },
+                    data: {
+                        status: 'COMPLETED',
+                        note
+                    }
+                });
+            });
+            res.status(200).json({
+                message: 'Batch updated successfully',
+                data: { batch }
+            });
+        }
+        catch (error) {
+            error.status = 400;
+            next(error);
+        }
+    }
+    static async deleteBatch(req, res, next) {
+        try {
+            const { id } = req.params;
+            const allowed = req.checkpointCodes ?? [];
+            const batch = await prisma_1.default.uploadBatch.findUnique({
+                where: { id: Number(id) },
+                include: {
+                    cards: {
+                        select: { key: true, id: true, status: true, checkpointCode: true }
+                    }
+                }
+            });
+            if (!batch || !batch.cards.some(c => allowed.includes(c.checkpointCode))) {
+                const err = new Error('Batch not found');
+                err.status = 404;
+                throw err;
+            }
+            if (batch.status === 'COMPLETED') {
+                const err = new Error('Cannot delete a completed batch');
+                err.status = 400;
+                throw err;
+            }
+            const allowedStatuses = ['VERIFIED', 'UNVERIFIED', 'BROKEN', 'LOST'];
+            const invalidCards = batch.cards.filter(card => !allowedStatuses.includes(card.status));
+            if (invalidCards.length > 0) {
+                const invalidStatusList = [...new Set(invalidCards.map(c => c.status))].join(', ');
+                const err = new Error(`Cannot delete batch: ${invalidCards.length} card(s) have status (${invalidStatusList}) that cannot be deleted`);
+                err.status = 400;
+                throw err;
+            }
+            const checkpointCodes = [...new Set(batch.cards.map(c => c.checkpointCode))];
+            const cardIds = batch.cards.map(c => c.id);
+            const cardKeys = batch.cards.map(c => c.key);
+            await prisma_1.default.$transaction(async (tx) => {
+                if (cardIds.length > 0) {
+                    await tx.cardMovement.deleteMany({ where: { cardID: { in: cardIds } } });
+                }
+                if (cardKeys.length > 0) {
+                    await tx.merge.deleteMany({ where: { cardKey: { in: cardKeys } } });
+                }
+                await tx.card.deleteMany({ where: { batchCode: batch.code } });
+                await tx.number.deleteMany({ where: { batchCode: batch.code } });
+                if (checkpointCodes.length > 0) {
+                    await tx.cardStock.deleteMany({ where: { checkpointCode: { in: checkpointCodes } } });
+                }
+                await tx.uploadBatchProgress.deleteMany({ where: { batchCode: batch.code } });
+                await tx.uploadBatch.delete({ where: { id: batch.id } });
+            });
+            res.status(200).json({
+                message: 'Batch deleted successfully'
+            });
         }
         catch (error) {
             next(error);
@@ -32,9 +307,11 @@ class StockController {
     static async getCards(req, res, next) {
         try {
             const { page = 1, limit = 10, checkpointCode, status, search, uploadAt, batch, validatedAt } = req.query;
-            const where = {};
-            if (checkpointCode)
-                where.checkpointCode = checkpointCode;
+            const allowed = req.checkpointCodes ?? [];
+            const where = {
+                // Scope to checkpoints in the user's circle; intersect with any requested checkpointCode
+                checkpointCode: { in: (0, access_util_1.resolveCheckpointFilter)(checkpointCode, allowed) }
+            };
             if (status)
                 where.status = status;
             if (search) {
@@ -45,13 +322,9 @@ class StockController {
             }
             // validatedAt filter (related via Card -> Merge)
             if (validatedAt) {
-                where.merges = {
-                    some: {
-                        validatedAt: {
-                            gte: new Date(`${validatedAt}T00:00:00.000Z`),
-                            lt: new Date(`${validatedAt}T23:59:59.999Z`)
-                        }
-                    }
+                where.validatedAt = {
+                    gte: new Date(`${validatedAt}T00:00:00.000Z`),
+                    lt: new Date(`${validatedAt}T23:59:59.999Z`)
                 };
             }
             if (uploadAt || batch) {
@@ -68,7 +341,7 @@ class StockController {
                 };
             }
             const [cards, total] = await Promise.all([
-                prisma.card.findMany({
+                prisma_1.default.card.findMany({
                     where,
                     skip: (Number(page) - 1) * Number(limit),
                     take: Number(limit),
@@ -78,14 +351,14 @@ class StockController {
                     },
                     orderBy: { createdAt: 'desc' }
                 }),
-                prisma.card.count({ where })
+                prisma_1.default.card.count({ where })
             ]);
             const [totalUpload, totalSold, totalAvailable] = await Promise.all([
-                prisma.card.count(),
-                prisma.card.count({ where: {
+                prisma_1.default.card.count(),
+                prisma_1.default.card.count({ where: {
                         status: "SOLD"
                     } }),
-                prisma.card.count({ where: {
+                prisma_1.default.card.count({ where: {
                         status: "VERIFIED"
                     } })
             ]);
@@ -113,49 +386,23 @@ class StockController {
     }
     static async getCard(req, res, next) {
         try {
-            const { id } = req.params;
-            const card = await prisma.card.findUnique({
-                where: { id: Number(id) },
+            const { key } = req.params;
+            const allowed = req.checkpointCodes ?? [];
+            const card = await prisma_1.default.card.findUnique({
+                where: { key: key },
                 include: {
                     checkpoint: true,
-                    movements: {
-                        include: {
-                            card: true
-                        },
-                        orderBy: { createdAt: 'desc' }
-                    }
+                    movements: { orderBy: { createdAt: 'desc' } }
                 }
             });
-            if (!card) {
-                throw new Error('Card not found');
+            if (!card || !(0, access_util_1.hasCheckpointAccess)(card.checkpointCode, allowed)) {
+                const err = new Error('Card not found');
+                err.status = 404;
+                throw err;
             }
             res.status(200).json({
                 message: 'Card retrieved successfully',
-                data: card
-            });
-        }
-        catch (error) {
-            next(error);
-        }
-    }
-    static async updateCard(req, res, next) {
-        try {
-            const { id } = req.params;
-            const { name, status, remark } = req.body;
-            const card = await prisma.card.update({
-                where: { id: Number(id) },
-                data: {
-                    ...(name !== undefined && { name }),
-                    ...(status && { status }),
-                    ...(remark !== undefined && { remark })
-                },
-                include: {
-                    checkpoint: true
-                }
-            });
-            res.status(200).json({
-                message: 'Card updated successfully',
-                data: card
+                data: { card }
             });
         }
         catch (error) {
@@ -165,7 +412,14 @@ class StockController {
     static async deleteCard(req, res, next) {
         try {
             const { id } = req.params;
-            await prisma.card.delete({
+            const allowed = req.checkpointCodes ?? [];
+            const existing = await prisma_1.default.card.findUnique({ where: { id: Number(id) } });
+            if (!existing || !(0, access_util_1.hasCheckpointAccess)(existing.checkpointCode, allowed)) {
+                const err = new Error('Card not found');
+                err.status = 404;
+                throw err;
+            }
+            await prisma_1.default.card.delete({
                 where: { id: Number(id) }
             });
             res.status(200).json({
@@ -185,80 +439,113 @@ class StockController {
             if (!file) {
                 throw new Error('No file uploaded');
             }
-            // // Parse the XLSX file
+            // Parse Excel outside the transaction — CPU-bound work should not hold a DB connection
             const workbook = xlsx.read(file.buffer, { type: 'buffer' });
             if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
                 throw new Error('Excel file has no sheets');
             }
-            const sheetName = workbook.SheetNames[0];
-            const worksheet = workbook.Sheets[sheetName];
-            const allowedSheets = ['ICCID', 'MSISDN'];
-            let jsonResult = [];
-            if (!worksheet) {
+            const firstWorksheet = workbook.Sheets[workbook.SheetNames[0]];
+            if (!firstWorksheet) {
                 throw new Error('Worksheet not found');
             }
-            for (let sheet of workbook.SheetNames) {
+            const allowedSheets = ['ICCID', 'MSISDN'];
+            const parsedSheets = [];
+            for (const sheet of workbook.SheetNames) {
                 const sheetData = workbook.Sheets[sheet];
                 if (!sheetData || !allowedSheets.includes(sheet))
                     continue;
-                jsonResult.push({
-                    sheet: sheet,
-                    data: xlsx.utils.sheet_to_json(sheetData)
-                });
+                parsedSheets.push({ sheet, rows: xlsx.utils.sheet_to_json(sheetData) });
             }
-            const lastBatch = await prisma.uploadBatch.findFirst({
-                orderBy: {
-                    id: 'desc'
-                }
+            const { batchID } = req.body;
+            const userCode = req.user.code;
+            const allowed = req.checkpointCodes ?? [];
+            // Prepare rows without batchCode; batchCode is injected inside the transaction.
+            // ICCID rows without a CHECKPOINT column are skipped — cards require a checkpoint.
+            // ICCID rows whose checkpoint is outside the user's circle are also rejected.
+            // MSISDN rows may omit CHECKPOINT (numbers are globally accessible).
+            let skippedCardRows = 0;
+            const preparedSheets = parsedSheets.map(({ sheet, rows }) => {
+                const seen = new Set();
+                const data = rows
+                    .flatMap((row) => {
+                    const key = String(row.KEY || row.key);
+                    const rawCheckpoint = row.CHECKPOINT || row.checkpoint;
+                    if (sheet === 'ICCID') {
+                        if (!rawCheckpoint || !allowed.includes(String(rawCheckpoint))) {
+                            skippedCardRows++;
+                            return [];
+                        }
+                    }
+                    return [{
+                            key,
+                            checkpointCode: rawCheckpoint ? String(rawCheckpoint) : null,
+                            remark: row.REMARK || row.remark || ''
+                        }];
+                })
+                    .filter((item) => {
+                    if (!item.key || item.key === 'undefined' || seen.has(item.key))
+                        return false;
+                    seen.add(item.key);
+                    return true;
+                });
+                return { sheet, data };
             });
-            const batchCode = lastBatch ? `UP${lastBatch.id + 1}` : `UP1`;
-            const batch = await prisma.uploadBatch.create({
-                data: {
-                    code: batchCode,
-                    userCode: req.user.code
-                }
-            });
-            // Extract number data from the Excel file with batchCode
-            const jsonData = jsonResult.map(each => ({
-                sheet: each.sheet,
-                data: each.data.map((row) => ({
-                    key: String(row.KEY || row.key),
-                    checkpointCode: (row.CHECKPOINT || row.checkpoint) ? String(row.CHECKPOINT || row.checkpoint) : null,
-                    remark: row.REMARK || row.remark || '',
-                    batchCode: batch.code
-                })).filter((item) => item.key)
-            }));
-            // Bulk create cards and numbers with batchCode
-            const result = await Promise.all(jsonData.map(each => {
-                if (each.sheet === 'ICCID') {
-                    return prisma.card.createMany({
-                        data: each.data,
-                        skipDuplicates: true
-                    });
+            const { totalCreated, parsedTotal } = await prisma_1.default.$transaction(async (tx) => {
+                let batch;
+                if (batchID) {
+                    const existing = await tx.uploadBatch.findUnique({ where: { id: Number(batchID) } });
+                    if (!existing)
+                        throw new Error(`Batch with id ${batchID} not found`);
+                    if (existing.status === 'COMPLETED')
+                        throw new Error(`Batch with id ${batchID} is already completed`);
+                    batch = existing;
                 }
                 else {
-                    return prisma.number.createMany({
-                        data: each.data,
-                        skipDuplicates: true
+                    const lastBatch = await tx.uploadBatch.findFirst({ orderBy: { id: 'desc' } });
+                    const batchCode = lastBatch ? `UP${lastBatch.id + 1}` : 'UP1';
+                    batch = await tx.uploadBatch.create({
+                        data: { code: batchCode, userCode, status: 'ONGOING', total: 0 }
                     });
                 }
-            }));
-            const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
-            // Delete the batch if no items were created
-            if (totalCreated === 0) {
-                await prisma.uploadBatch.delete({
-                    where: {
-                        code: batch.code
-                    }
-                });
-            }
-            res.status(200).json({
-                message: 'Numbers uploaded successfully',
-                data: {
-                    total: jsonData.flatMap(each => each.data).length,
-                    created: totalCreated
+                // Inject batchCode now that we have it
+                const jsonData = preparedSheets.map(({ sheet, data }) => ({
+                    sheet,
+                    data: data.map(row => ({ ...row, batchCode: batch.code }))
+                }));
+                const parsedTotal = jsonData.reduce((sum, s) => sum + s.data.length, 0);
+                if (!batchID) {
+                    await tx.uploadBatch.update({
+                        where: { id: batch.id },
+                        data: { total: jsonData.find(s => s.sheet === 'ICCID')?.data.length || 0 }
+                    });
                 }
+                const result = await Promise.all(jsonData.map(({ sheet, data }) => sheet === 'ICCID'
+                    ? tx.card.createMany({ data: data, skipDuplicates: true })
+                    : tx.number.createMany({ data, skipDuplicates: true })));
+                const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
+                if (batchID) {
+                    const newCardsCount = result[jsonData.findIndex(s => s.sheet === 'ICCID')]?.count ?? 0;
+                    await tx.uploadBatch.update({
+                        where: { id: batch.id },
+                        data: { total: { increment: newCardsCount } }
+                    });
+                }
+                else if (totalCreated === 0) {
+                    await tx.uploadBatch.delete({ where: { id: batch.id } });
+                }
+                return { totalCreated, parsedTotal };
             });
+            res.status(200).json({
+                message: 'Upload completed successfully',
+                data: { total: parsedTotal, created: totalCreated, skipped: skippedCardRows }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    static async downloadExcel(req, res, next) {
+        try {
         }
         catch (error) {
             next(error);
@@ -266,30 +553,59 @@ class StockController {
     }
     static async validateCard(req, res, next) {
         try {
-            const { key, status } = req.params;
+            const { key } = req.params;
+            const { status } = req.body;
             const rawStatus = Array.isArray(status) ? status[0] : status;
-            const card = await prisma.$transaction(async (tx) => {
+            const card = await prisma_1.default.$transaction(async (tx) => {
                 if (!req.user) {
                     throw new Error('User not found');
                 }
                 if (!rawStatus || rawStatus === "UNVERIFIED") {
-                    throw new Error('Please provide status');
+                    throw new Error("Please provide status, wether it's VERIFIED or BROKEN");
                 }
-                if (!Object.values(ItemStatus).includes(rawStatus)) {
+                if (!Object.values(enums_1.ItemStatus).includes(rawStatus)) {
                     throw new Error('Invalid status');
                 }
                 const nextStatus = rawStatus;
-                const card = await tx.card.update({
+                let updateData = {
+                    status: nextStatus
+                };
+                const card = await tx.card.findFirst({
                     where: {
-                        key: key,
-                        status: "UNVERIFIED"
+                        key: key
                     },
-                    data: {
-                        status: nextStatus,
-                        validatedAt: new Date()
+                    include: {
+                        uploadBatch: true
                     }
                 });
-                const [stock] = await Promise.all([
+                if (!card) {
+                    throw new Error('Card not found');
+                }
+                if (!card.uploadBatch) {
+                    throw new Error('Card upload batch not found');
+                }
+                if (card.uploadBatch.status === "COMPLETED") {
+                    throw new Error('Card upload batch is already completed');
+                }
+                if (card.status === "UNVERIFIED") {
+                    updateData.validatedAt = new Date();
+                }
+                const cards = await tx.card.updateMany({
+                    where: {
+                        key: key
+                    },
+                    data: updateData
+                });
+                if (cards.count === 0) {
+                    throw new Error('Card already validated');
+                }
+                const allowed = req.checkpointCodes ?? [];
+                if (!(0, access_util_1.hasCheckpointAccess)(card.checkpointCode, allowed)) {
+                    const err = new Error('Card not found');
+                    err.status = 404;
+                    throw err;
+                }
+                const [stock, lastProgress] = await Promise.all([
                     tx.cardStock.findFirst({
                         where: {
                             checkpointCode: card.checkpointCode
@@ -298,26 +614,160 @@ class StockController {
                             createdAt: 'desc'
                         }
                     }),
-                    tx.cardMovement.create({
-                        data: {
-                            cardID: card.id,
-                            type: "INITIAL",
-                            userCode: req.user.code,
-                            sourceCode: null,
-                            targetCode: card.checkpointCode
+                    tx.uploadBatchProgress.findFirst({
+                        where: {
+                            batchCode: card.uploadBatch.code
+                        },
+                        orderBy: {
+                            createdAt: 'desc'
                         }
                     })
                 ]);
-                await tx.cardStock.create({
-                    data: {
-                        checkpointCode: card.checkpointCode,
-                        amount: Number(stock?.amount || 0) + 1
+                if (card.status === "UNVERIFIED" || card.status === "BROKEN" || card.status === "LOST") {
+                    if (card.status === "UNVERIFIED") {
+                        await tx.uploadBatchProgress.create({
+                            data: {
+                                batchCode: card.uploadBatch.code,
+                                progress: (lastProgress?.progress || 0) + 1
+                            }
+                        });
                     }
-                });
+                    if (nextStatus === "VERIFIED") {
+                        await Promise.all([
+                            tx.cardMovement.create({
+                                data: {
+                                    cardID: card.id,
+                                    type: "INITIAL",
+                                    userCode: req.user.code,
+                                    sourceCode: null,
+                                    targetCode: card.checkpointCode
+                                }
+                            }),
+                            tx.cardStock.create({
+                                data: {
+                                    checkpointCode: card.checkpointCode,
+                                    amount: Number(stock?.amount || 0) + 1
+                                }
+                            })
+                        ]);
+                    }
+                }
+                else if (card.status === "VERIFIED") {
+                    if (nextStatus === "UNVERIFIED" || nextStatus === "BROKEN" || nextStatus === "LOST") {
+                        await Promise.all([
+                            tx.cardMovement.create({
+                                data: {
+                                    cardID: card.id,
+                                    type: "ADJUSTMENT",
+                                    userCode: req.user.code,
+                                    sourceCode: card.checkpointCode,
+                                    targetCode: null
+                                }
+                            }),
+                            tx.cardStock.create({
+                                data: {
+                                    checkpointCode: card.checkpointCode,
+                                    amount: Number(stock?.amount || 0) - 1
+                                }
+                            })
+                        ]);
+                    }
+                }
+                else {
+                    throw new Error('Invalid status');
+                }
             });
             res.status(200).json({
                 message: 'Card validated successfully',
-                data: card
+                data: { card }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    static async bulkMergeSim(req, res, next) {
+        try {
+            const { sims, checkpointCode, type, trn } = req.body;
+            if (!req.user)
+                throw new Error('User not found');
+            if (!Array.isArray(sims) || sims.length === 0)
+                throw new Error('sims must be a non-empty array');
+            if (!type)
+                throw new Error('Type is required');
+            if (type === 'SIMCARD' && sims.some((s) => !s.cardKey))
+                throw new Error('ICCID is required for SIMCARD type');
+            if (!checkpointCode)
+                throw new Error('Checkpoint code is required');
+            if (!trn)
+                throw new Error('TRN is required');
+            const allowed = req.checkpointCodes ?? [];
+            if (!(0, access_util_1.hasCheckpointAccess)(checkpointCode, allowed)) {
+                const err = new Error('Checkpoint not found');
+                err.status = 404;
+                throw err;
+            }
+            const results = await prisma_1.default.$transaction(async (tx) => {
+                const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
+                if (!checkpoint)
+                    throw new Error(`Checkpoint not found: ${checkpointCode}`);
+                const merged = [];
+                for (const { cardKey, numberKey } of sims) {
+                    if (type === 'SIMCARD' || type === 'ESIM') {
+                        const number = await tx.number.findUnique({ where: { key: numberKey, status: 'VERIFIED' } });
+                        if (!number)
+                            throw new Error(`Number not found or not verified: ${numberKey}`);
+                        if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
+                            throw new Error(`Number checkpoint code does not match: ${numberKey}`);
+                        }
+                        await tx.number.update({ where: { key: numberKey }, data: { status: 'SOLD' } });
+                    }
+                    let esimCode = '';
+                    if (type === 'ESIM') {
+                        esimCode = 'ESIM-' + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+                    }
+                    else if (type === 'CPP') {
+                        esimCode = 'CPP-' + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+                    }
+                    else if (type === 'MIGRATION') {
+                        esimCode = 'MGR-' + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+                    }
+                    else {
+                        esimCode = cardKey;
+                    }
+                    if (type === 'SIMCARD') {
+                        const card = await tx.card.findUnique({ where: { key: cardKey, status: 'VERIFIED' } });
+                        if (!card)
+                            throw new Error(`Card not found or not verified: ${cardKey}`);
+                        if (checkpoint.code !== card.checkpointCode) {
+                            throw new Error(`Checkpoint code does not match card checkpoint code: ${cardKey}`);
+                        }
+                        await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
+                        const stock = await tx.cardStock.findFirst({
+                            where: { checkpointCode: card.checkpointCode },
+                            orderBy: { createdAt: 'desc' }
+                        });
+                        if (!stock || Number(stock.amount) <= 0) {
+                            throw new Error(`Card unavailable at checkpoint: ${checkpointCode}`);
+                        }
+                        await tx.cardStock.create({
+                            data: { checkpointCode: card.checkpointCode, amount: Number(stock.amount) - 1 }
+                        });
+                        merged.push(await tx.merge.create({
+                            data: { cardKey, numberKey, checkpointCode, userCode: req.user.code, TRN: trn, soldAt: new Date() }
+                        }));
+                    }
+                    else {
+                        merged.push(await tx.mergeAdditional.create({
+                            data: { cardKey: esimCode, numberKey, checkpointCode, userCode: req.user.code, TRN: trn, type, soldAt: new Date() }
+                        }));
+                    }
+                }
+                return merged;
+            });
+            res.status(200).json({
+                message: 'Sims successfully merged',
+                data: { merges: results }
             });
         }
         catch (error) {
@@ -326,98 +776,138 @@ class StockController {
     }
     static async mergeSim(req, res, next) {
         try {
-            const { cardKey, numberKey } = req.body;
-            const sim = await prisma.$transaction(async (tx) => {
-                if (!req.user) {
-                    throw new Error('User not found');
+            const { cardKey, numberKey, checkpointCode, type, trn } = req.body;
+            if (!req.user)
+                throw new Error('User not found');
+            if (!type)
+                throw new Error('Type is required');
+            if (type === 'SIMCARD' && !cardKey)
+                throw new Error('ICCID is required for SIMCARD type');
+            if (!checkpointCode)
+                throw new Error('Checkpoint code is required');
+            if (!trn)
+                throw new Error('TRN is required');
+            const allowed = req.checkpointCodes ?? [];
+            if (!(0, access_util_1.hasCheckpointAccess)(checkpointCode, allowed)) {
+                const err = new Error('Checkpoint not found');
+                err.status = 404;
+                throw err;
+            }
+            const sim = await prisma_1.default.$transaction(async (tx) => {
+                const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
+                if (!checkpoint)
+                    throw new Error('Checkpoint not found');
+                let number;
+                if (type === "SIMCARD" || type === "ESIM") {
+                    [number] = await Promise.all([
+                        tx.number.findUnique({
+                            where: {
+                                key: numberKey,
+                                status: "VERIFIED"
+                            }
+                        }),
+                        tx.number.update({
+                            where: {
+                                key: numberKey
+                            },
+                            data: {
+                                status: 'SOLD'
+                            }
+                        })
+                    ]);
+                    if (!number) {
+                        throw new Error('Number not found');
+                    }
+                    if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
+                        throw new Error('Number checkpoint code does not match checkpoint code');
+                    }
                 }
-                const [card, number] = await Promise.all([
-                    tx.card.findUnique({
-                        where: {
-                            key: cardKey,
-                            status: "VERIFIED"
-                        }
-                    }),
-                    tx.number.findUnique({
-                        where: {
-                            key: numberKey,
-                            status: "VERIFIED"
-                        }
-                    }),
-                    tx.card.update({
-                        where: {
-                            key: cardKey
-                        },
-                        data: {
-                            status: 'SOLD'
-                        }
-                    }),
-                    tx.number.update({
-                        where: {
-                            key: numberKey
-                        },
-                        data: {
-                            status: 'SOLD'
-                        }
-                    })
-                ]);
-                if (!card) {
-                    throw new Error('Card not found');
-                }
-                if (!number) {
-                    throw new Error('Number not found');
-                }
-                const [sim, stock] = await Promise.all([
-                    tx.merge.create({
-                        data: {
-                            cardKey,
-                            numberKey,
-                            soldAt: new Date()
-                        }
-                    }),
-                    tx.cardStock.findFirst({
+                let card;
+                if (type === "SIMCARD") {
+                    [card] = await Promise.all([
+                        tx.card.findUnique({
+                            where: {
+                                key: cardKey,
+                                status: "VERIFIED"
+                            }
+                        }),
+                        tx.card.update({
+                            where: {
+                                key: cardKey
+                            },
+                            data: {
+                                status: 'SOLD'
+                            }
+                        }),
+                    ]);
+                    if (!card) {
+                        throw new Error('Card not found');
+                    }
+                    if (checkpoint.code !== card?.checkpointCode) {
+                        throw new Error('Checkpoint code does not match card checkpoint code');
+                    }
+                    const stock = await tx.cardStock.findFirst({
                         where: {
                             checkpointCode: card.checkpointCode
                         },
                         orderBy: {
                             createdAt: 'desc'
                         }
-                    })
-                ]);
-                if (!stock || Number(stock.amount) <= 0) {
-                    throw new Error('Card unavailable');
-                }
-                await Promise.all([
-                    tx.cardStock.create({
+                    });
+                    if (!stock || Number(stock.amount) <= 0) {
+                        throw new Error('Card unavailable');
+                    }
+                    await tx.cardStock.create({
                         data: {
                             checkpointCode: card.checkpointCode,
                             amount: Number(stock.amount) - 1
                         }
-                    }),
-                    tx.cardMovement.create({
+                    });
+                }
+                let esimCode = "";
+                if (type === "ESIM") {
+                    esimCode = "ESIM-" + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+                }
+                else if (type === "CPP") {
+                    esimCode = "CPP-" + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+                }
+                else if (type === "MIGRATION") {
+                    esimCode = "MGR-" + (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).toUpperCase();
+                }
+                else {
+                    esimCode = cardKey;
+                }
+                let sim;
+                if (type === "SIMCARD") {
+                    sim = await tx.merge.create({
                         data: {
-                            cardID: card.id,
-                            type: 'SALE',
+                            cardKey,
+                            numberKey,
+                            checkpointCode,
                             userCode: req.user.code,
-                            sourceCode: card.checkpointCode,
-                            targetCode: null
+                            TRN: trn,
+                            soldAt: new Date()
                         }
-                    }),
-                    tx.numberMovement.create({
+                    });
+                }
+                else {
+                    sim = await tx.mergeAdditional.create({
                         data: {
-                            numberID: number.id,
-                            type: 'SALE',
+                            cardKey: esimCode,
+                            numberKey,
+                            checkpointCode,
                             userCode: req.user.code,
-                            sourceCode: number.checkpointCode,
-                            targetCode: null
+                            TRN: trn,
+                            type,
+                            soldAt: new Date()
                         }
-                    })
-                ]);
+                    });
+                }
                 return sim;
             });
             res.status(200).json({
                 message: 'Sim successfully merged',
-                data: sim
+                data: { sim }
             });
         }
         catch (error) {
@@ -453,10 +943,16 @@ class StockController {
     }
     static async getNumbers(req, res, next) {
         try {
-            const { page = 1, limit = 10, checkpointCode, status, search } = req.query;
-            const where = {};
-            if (checkpointCode)
-                where.checkpointCode = checkpointCode;
+            const { page = 1, limit = 10, checkpointCode, status, search, remark, sort } = req.query;
+            const allowed = req.checkpointCodes ?? [];
+            const checkpointFilter = (0, access_util_1.resolveCheckpointFilter)(checkpointCode, allowed);
+            // Numbers with no checkpoint are globally visible (available stock);
+            // numbers with a checkpoint are restricted to the user's circle.
+            const where = {
+                AND: [
+                    { OR: [{ checkpointCode: { in: checkpointFilter } }, { checkpointCode: null }] }
+                ]
+            };
             if (status)
                 where.status = status;
             if (search) {
@@ -465,25 +961,66 @@ class StockController {
                     { name: { contains: search, mode: 'insensitive' } }
                 ];
             }
+            if (remark) {
+                where.remark = {
+                    contains: remark, mode: 'insensitive'
+                };
+            }
+            if (sort) {
+                if (sort !== "ASC" && sort !== "DESC") {
+                    throw new Error("Sort field can only be filled with 'ASC' or 'DESC'");
+                }
+            }
             const [numbers, total] = await Promise.all([
-                prisma.number.findMany({
+                prisma_1.default.number.findMany({
                     where,
                     skip: (Number(page) - 1) * Number(limit),
                     take: Number(limit),
                     include: {
                         checkpoint: true,
-                        movements: {
-                            orderBy: { createdAt: 'desc' },
-                            take: 3
-                        }
+                        merge: true
                     },
                     orderBy: { createdAt: 'desc' }
                 }),
-                prisma.number.count({ where })
+                prisma_1.default.number.count({ where })
             ]);
+            const [totalUpload, totalAvailable] = await Promise.all([
+                prisma_1.default.number.count(),
+                prisma_1.default.number.count({
+                    where: {
+                        status: "VERIFIED"
+                    }
+                })
+            ]);
+            const totalMerge = await prisma_1.default.merge.count();
+            const monthlyMerge = await prisma_1.default.merge.count({
+                where: {
+                    createdAt: {
+                        gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+                    }
+                }
+            });
+            const dailyMerge = await prisma_1.default.merge.count({
+                where: {
+                    createdAt: {
+                        gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())
+                    }
+                }
+            });
             res.status(200).json({
                 message: 'Numbers retrieved successfully',
-                data: numbers,
+                data: {
+                    numbers,
+                    amount: {
+                        upload: totalUpload,
+                        available: totalAvailable,
+                        merge: {
+                            total: totalMerge,
+                            monthly: monthlyMerge,
+                            daily: dailyMerge
+                        }
+                    }
+                },
                 pagination: {
                     page: Number(page),
                     limit: Number(limit),
@@ -498,25 +1035,27 @@ class StockController {
     }
     static async getNumber(req, res, next) {
         try {
-            const { id } = req.params;
-            const number = await prisma.number.findUnique({
-                where: { id: Number(id) },
+            const { key } = req.params;
+            const allowed = req.checkpointCodes ?? [];
+            const number = await prisma_1.default.number.findUnique({
+                where: { key: key },
                 include: {
                     checkpoint: true,
                     movements: {
-                        include: {
-                            number: true
-                        },
+                        include: { number: true },
                         orderBy: { createdAt: 'desc' }
                     }
                 }
             });
-            if (!number) {
-                throw new Error('Number not found');
+            // allowNull=true: a number with no checkpoint is accessible to everyone
+            if (!number || !(0, access_util_1.hasCheckpointAccess)(number.checkpointCode, allowed, true)) {
+                const err = new Error('Number not found');
+                err.status = 404;
+                throw err;
             }
             res.status(200).json({
                 message: 'Number retrieved successfully',
-                data: number
+                data: { number }
             });
         }
         catch (error) {
@@ -525,10 +1064,17 @@ class StockController {
     }
     static async updateNumber(req, res, next) {
         try {
-            const { id } = req.params;
+            const { key } = req.params;
             const { name, status, remark } = req.body;
-            const number = await prisma.number.update({
-                where: { id: Number(id) },
+            const allowed = req.checkpointCodes ?? [];
+            const existing = await prisma_1.default.number.findUnique({ where: { key: key } });
+            if (!existing || !(0, access_util_1.hasCheckpointAccess)(existing.checkpointCode, allowed, true)) {
+                const err = new Error('Number not found');
+                err.status = 404;
+                throw err;
+            }
+            const number = await prisma_1.default.number.update({
+                where: { key: key },
                 data: {
                     ...(name !== undefined && { name }),
                     ...(status && { status }),
@@ -540,7 +1086,7 @@ class StockController {
             });
             res.status(200).json({
                 message: 'Number updated successfully',
-                data: number
+                data: { number }
             });
         }
         catch (error) {
@@ -549,9 +1095,16 @@ class StockController {
     }
     static async deleteNumber(req, res, next) {
         try {
-            const { id } = req.params;
-            await prisma.number.delete({
-                where: { id: Number(id) }
+            const { key } = req.params;
+            const allowed = req.checkpointCodes ?? [];
+            const existing = await prisma_1.default.number.findUnique({ where: { key: key } });
+            if (!existing || !(0, access_util_1.hasCheckpointAccess)(existing.checkpointCode, allowed, true)) {
+                const err = new Error('Number not found');
+                err.status = 404;
+                throw err;
+            }
+            await prisma_1.default.number.delete({
+                where: { key: key }
             });
             res.status(200).json({
                 message: 'Number deleted successfully'
@@ -561,5 +1114,93 @@ class StockController {
             next(error);
         }
     }
+    static async getMerges(req, res, next) {
+        try {
+            const { page = 1, limit = 10, checkpointCode, startSoldAt, endSoldAt, cardRemark, search, type } = req.query;
+            const allowed = req.checkpointCodes ?? [];
+            let where = {
+                checkpointCode: { in: (0, access_util_1.resolveCheckpointFilter)(checkpointCode, allowed) }
+            };
+            if (startSoldAt) {
+                where.createdAt = {
+                    gte: new Date(new Date(startSoldAt).setHours(0, 0, 0, 0))
+                };
+            }
+            if (endSoldAt) {
+                where.createdAt = {
+                    ...where.createdAt,
+                    lte: new Date(new Date(endSoldAt).setHours(23, 59, 59, 999))
+                };
+            }
+            if (cardRemark) {
+                where.number = {
+                    remark: cardRemark
+                };
+            }
+            if (search) {
+                where.number = {
+                    ...where.number,
+                    key: {
+                        contains: search
+                    }
+                };
+            }
+            let merges;
+            if (type === "SIMCARD" || !type) {
+                merges = await prisma_1.default.merge.findMany({
+                    skip: (Number(page) - 1) * Number(limit),
+                    take: Number(limit),
+                    orderBy: { createdAt: 'desc' },
+                    where,
+                    include: {
+                        number: true
+                    }
+                });
+            }
+            else {
+                merges = await prisma_1.default.mergeAdditional.findMany({
+                    skip: (Number(page) - 1) * Number(limit),
+                    take: Number(limit),
+                    orderBy: { createdAt: 'desc' },
+                    where
+                });
+            }
+            const [total, monthly, daily] = await Promise.all([
+                prisma_1.default.merge.count({ where: { checkpointCode: { in: allowed } } }),
+                prisma_1.default.merge.count({
+                    where: {
+                        checkpointCode: { in: allowed },
+                        createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
+                    }
+                }),
+                prisma_1.default.merge.count({
+                    where: {
+                        checkpointCode: { in: allowed },
+                        createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }
+                    }
+                })
+            ]);
+            res.status(200).json({
+                message: 'Merges retrieved successfully',
+                data: {
+                    merges,
+                    amount: {
+                        total,
+                        monthly,
+                        daily
+                    },
+                    pagination: {
+                        page: Number(page),
+                        limit: Number(limit),
+                        total,
+                        pages: Math.ceil(total / Number(limit))
+                    }
+                }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
 }
-export default StockController;
+exports.default = StockController;
