@@ -704,6 +704,18 @@ class StockController {
           throw new Error('Card upload batch is already completed');
         }
 
+        if (card.status === 'OPNAME') {
+          throw new Error('Card is currently in an opname session and cannot be modified');
+        }
+
+        if (card.status === 'DELIVERY') {
+          throw new Error('Card is currently in delivery and cannot be modified');
+        }
+
+        if (card.status === 'SOLD') {
+          throw new Error('Card has already been sold');
+        }
+
         if (card.status === "UNVERIFIED") {
           updateData.validatedAt = new Date();
         }
