@@ -29,12 +29,12 @@ router.post('/cards/validate/:key', stock_controller_1.default.validateCard);
 router.post('/numbers', stock_controller_1.default.createNumber);
 // GET /api/stock/numbers - Get all numbers with pagination and filtering
 router.get('/numbers', stock_controller_1.default.getNumbers);
-// GET /api/stock/numbers/:id - Get a specific number by ID
-router.get('/numbers/:id', stock_controller_1.default.getNumber);
-// PUT /api/stock/numbers/:id - Update a specific number
-router.put('/numbers/:id', stock_controller_1.default.updateNumber);
-// DELETE /api/stock/numbers/:id - Delete a specific number
-router.delete('/numbers/:id', stock_controller_1.default.deleteNumber);
+// GET /api/stock/numbers/:key - Get a specific number by key
+router.get('/numbers/:key', stock_controller_1.default.getNumber);
+// PUT /api/stock/numbers/:key - Update a specific number
+router.put('/numbers/:key', stock_controller_1.default.updateNumber);
+// DELETE /api/stock/numbers/:key - Delete a specific number
+router.delete('/numbers/:key', stock_controller_1.default.deleteNumber);
 // POST /api/upload/xlsx - Upload bunch of cards from Excel file
 router.post('/upload/xlsx', (0, multer_config_1.default)('xlsx').single('source'), stock_controller_1.default.uploadExcel);
 // POST /api/stock/merge - Merge card and number

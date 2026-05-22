@@ -38,7 +38,6 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const prisma_1 = __importDefault(require("../../lib/prisma"));
 const xlsx = __importStar(require("xlsx"));
-const enums_1 = require("../../generated/prisma/enums");
 const access_util_1 = require("../utils/access.util");
 class StockController {
     static async dashboardSync(req, res, next) {
@@ -48,7 +47,7 @@ class StockController {
                 status: 'DELIVERED',
                 OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }]
             };
-            const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards] = await Promise.all([
+            const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards, topSaleByUser] = await Promise.all([
                 // 1. Cards distributed TO DC checkpoints
                 prisma_1.default.distribution.aggregate({
                     _sum: { amount: true },
@@ -72,17 +71,47 @@ class StockController {
                 prisma_1.default.card.findMany({
                     where: { checkpointCode: { in: allowed }, status: { in: ['BROKEN', 'LOST'] } },
                     select: { id: true }
+                }),
+                // Top 10 users by total sales (merges) within scope
+                prisma_1.default.merge.groupBy({
+                    by: ['userCode'],
+                    where: { checkpointCode: { in: allowed } },
+                    _count: { userCode: true },
+                    orderBy: { _count: { userCode: 'desc' } },
+                    take: 10
                 })
             ]);
+            const storeCheckpointCodes = allCheckpoints
+                .filter(c => c.type === 'STORE')
+                .map(c => c.code);
             // Cards that are BROKEN/LOST but discovered via opname still count toward initial stock.
             // OpnameUpdate.itemID = card.id but no Prisma relation exists, so we resolve in two steps.
             const brokenLostIds = brokenLostCards.map(c => c.id);
-            const opnamedBrokenLostCount = brokenLostIds.length > 0
-                ? await prisma_1.default.opnameUpdate.groupBy({
-                    by: ['itemID'],
-                    where: { itemID: { in: brokenLostIds } }
-                }).then(groups => groups.length)
-                : 0;
+            const [opnamedBrokenLostCount, topSaleByCheckpoint] = await Promise.all([
+                brokenLostIds.length > 0
+                    ? prisma_1.default.opnameUpdate.groupBy({
+                        by: ['itemID'],
+                        where: { itemID: { in: brokenLostIds } }
+                    }).then(groups => groups.length)
+                    : Promise.resolve(0),
+                // Top 10 STORE checkpoints by total sales (merges)
+                prisma_1.default.merge.groupBy({
+                    by: ['checkpointCode'],
+                    where: { checkpointCode: { in: storeCheckpointCodes } },
+                    _count: { checkpointCode: true },
+                    orderBy: { _count: { checkpointCode: 'desc' } },
+                    take: 10
+                })
+            ]);
+            // Enrich top-selling users with their name
+            const topUserCodes = topSaleByUser.map(r => r.userCode);
+            const topUserDetails = topUserCodes.length > 0
+                ? await prisma_1.default.user.findMany({
+                    where: { code: { in: topUserCodes } },
+                    select: { code: true, name: true }
+                })
+                : [];
+            const userDetailMap = Object.fromEntries(topUserDetails.map(u => [u.code, u]));
             const initialStock = baseInitialCount + opnamedBrokenLostCount;
             // 6. Final stock: sum of latest CardStock per checkpoint
             //    (already nets out sales, opname BROKEN/LOST, and adjustments)
@@ -100,6 +129,17 @@ class StockController {
                 .map(withStock)
                 .sort((a, b) => b.currentStock - a.currentStock)
                 .slice(0, 10);
+            const checkpointMap = Object.fromEntries(allCheckpoints.map(c => [c.code, c]));
+            // Top 10 STORE checkpoints ranked by highest sales
+            const topHighestSaleByCheckpoint = topSaleByCheckpoint.map(row => ({
+                checkpoint: checkpointMap[row.checkpointCode],
+                totalSales: row._count.checkpointCode
+            }));
+            // Top 10 users ranked by highest sales
+            const topHighestSaleByUser = topSaleByUser.map(row => ({
+                user: userDetailMap[row.userCode] ?? { code: row.userCode, name: null },
+                totalSales: row._count.userCode
+            }));
             res.status(200).json({
                 message: 'Dashboard synced successfully',
                 data: {
@@ -108,7 +148,9 @@ class StockController {
                     distributedToDC: dcAggregate._sum.amount ?? 0,
                     distributedToStore: storeAggregate._sum.amount ?? 0,
                     topLeastStoreStock,
-                    topMostDCStock
+                    topMostDCStock,
+                    topHighestSaleByCheckpoint,
+                    topHighestSaleByUser
                 }
             });
         }
@@ -123,12 +165,12 @@ class StockController {
             const batch = await prisma_1.default.uploadBatch.findUnique({
                 where: { id: Number(id) },
                 include: {
-                    cards: true,
-                    numbers: true,
-                    progress: true
+                    cards: { take: 50, orderBy: { createdAt: 'desc' } },
+                    numbers: { take: 50, orderBy: { createdAt: 'desc' } },
+                    progress: { take: 1, orderBy: { createdAt: 'desc' } }
                 }
             });
-            if (!batch || !batch.cards.some(c => allowed.includes(c.checkpointCode))) {
+            if (!batch || (batch.cards.length > 0 && !batch.cards.some(c => allowed.includes(c.checkpointCode)))) {
                 const err = new Error('Batch not found');
                 err.status = 404;
                 throw err;
@@ -214,9 +256,14 @@ class StockController {
                     where: { id: Number(id) },
                     include: { cards: { select: { checkpointCode: true } } }
                 });
-                if (!currentBatch || !currentBatch.cards.some(c => allowed.includes(c.checkpointCode))) {
+                if (!currentBatch || (currentBatch.cards.length > 0 && !currentBatch.cards.some(c => allowed.includes(c.checkpointCode)))) {
                     const err = new Error('Batch not found');
                     err.status = 404;
+                    throw err;
+                }
+                if (currentBatch.status === 'COMPLETED') {
+                    const err = new Error('Batch is already completed');
+                    err.status = 400;
                     throw err;
                 }
                 await tx.card.updateMany({
@@ -244,7 +291,6 @@ class StockController {
             });
         }
         catch (error) {
-            error.status = 400;
             next(error);
         }
     }
@@ -278,9 +324,15 @@ class StockController {
                 err.status = 400;
                 throw err;
             }
-            const checkpointCodes = [...new Set(batch.cards.map(c => c.checkpointCode))];
             const cardIds = batch.cards.map(c => c.id);
             const cardKeys = batch.cards.map(c => c.key);
+            // Group VERIFIED cards by checkpoint — only VERIFIED cards contributed to CardStock.
+            const verifiedByCheckpoint = batch.cards
+                .filter(c => c.status === 'VERIFIED')
+                .reduce((acc, c) => {
+                acc[c.checkpointCode] = (acc[c.checkpointCode] ?? 0) + 1;
+                return acc;
+            }, {});
             await prisma_1.default.$transaction(async (tx) => {
                 if (cardIds.length > 0) {
                     await tx.cardMovement.deleteMany({ where: { cardID: { in: cardIds } } });
@@ -290,8 +342,16 @@ class StockController {
                 }
                 await tx.card.deleteMany({ where: { batchCode: batch.code } });
                 await tx.number.deleteMany({ where: { batchCode: batch.code } });
-                if (checkpointCodes.length > 0) {
-                    await tx.cardStock.deleteMany({ where: { checkpointCode: { in: checkpointCodes } } });
+                // Decrement CardStock only by the VERIFIED cards removed per checkpoint,
+                // instead of wiping all CardStock rows (which would erase other batches' contributions).
+                for (const [checkpointCode, count] of Object.entries(verifiedByCheckpoint)) {
+                    const latest = await tx.cardStock.findFirst({
+                        where: { checkpointCode },
+                        orderBy: { createdAt: 'desc' }
+                    });
+                    await tx.cardStock.create({
+                        data: { checkpointCode, amount: (latest?.amount ?? 0) - count }
+                    });
                 }
                 await tx.uploadBatchProgress.deleteMany({ where: { batchCode: batch.code } });
                 await tx.uploadBatch.delete({ where: { id: batch.id } });
@@ -354,13 +414,9 @@ class StockController {
                 prisma_1.default.card.count({ where })
             ]);
             const [totalUpload, totalSold, totalAvailable] = await Promise.all([
-                prisma_1.default.card.count(),
-                prisma_1.default.card.count({ where: {
-                        status: "SOLD"
-                    } }),
-                prisma_1.default.card.count({ where: {
-                        status: "VERIFIED"
-                    } })
+                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed } } }),
+                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: "SOLD" } }),
+                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: "VERIFIED" } })
             ]);
             res.status(200).json({
                 message: 'Cards retrieved successfully',
@@ -419,8 +475,16 @@ class StockController {
                 err.status = 404;
                 throw err;
             }
-            await prisma_1.default.card.delete({
-                where: { id: Number(id) }
+            if (existing.status === 'SOLD' || existing.status === 'HOLD') {
+                const err = new Error(`Cannot delete a ${existing.status.toLowerCase()} card`);
+                err.status = 400;
+                throw err;
+            }
+            await prisma_1.default.$transaction(async (tx) => {
+                await tx.cardMovement.deleteMany({ where: { cardID: existing.id } });
+                await tx.merge.deleteMany({ where: { cardKey: existing.key } });
+                await tx.distributionItem.deleteMany({ where: { itemKey: existing.key } });
+                await tx.card.delete({ where: { id: existing.id } });
             });
             res.status(200).json({
                 message: 'Card deleted successfully'
@@ -560,26 +624,26 @@ class StockController {
                 if (!req.user) {
                     throw new Error('User not found');
                 }
-                if (!rawStatus || rawStatus === "UNVERIFIED") {
-                    throw new Error("Please provide status, wether it's VERIFIED or BROKEN");
-                }
-                if (!Object.values(enums_1.ItemStatus).includes(rawStatus)) {
-                    throw new Error('Invalid status');
+                const validTargetStatuses = ['VERIFIED', 'BROKEN'];
+                if (!rawStatus || !validTargetStatuses.includes(rawStatus)) {
+                    throw new Error("Please provide status, either 'VERIFIED' or 'BROKEN'");
                 }
                 const nextStatus = rawStatus;
                 let updateData = {
                     status: nextStatus
                 };
-                const card = await tx.card.findFirst({
-                    where: {
-                        key: key
-                    },
-                    include: {
-                        uploadBatch: true
-                    }
+                const card = await tx.card.findUnique({
+                    where: { key: key },
+                    include: { uploadBatch: true }
                 });
                 if (!card) {
                     throw new Error('Card not found');
+                }
+                const allowed = req.checkpointCodes ?? [];
+                if (!(0, access_util_1.hasCheckpointAccess)(card.checkpointCode, allowed)) {
+                    const err = new Error('Card not found');
+                    err.status = 404;
+                    throw err;
                 }
                 if (!card.uploadBatch) {
                     throw new Error('Card upload batch not found');
@@ -590,39 +654,14 @@ class StockController {
                 if (card.status === "UNVERIFIED") {
                     updateData.validatedAt = new Date();
                 }
-                const cards = await tx.card.updateMany({
-                    where: {
-                        key: key
-                    },
+                await tx.card.update({
+                    where: { key: key },
                     data: updateData
                 });
-                if (cards.count === 0) {
-                    throw new Error('Card already validated');
-                }
-                const allowed = req.checkpointCodes ?? [];
-                if (!(0, access_util_1.hasCheckpointAccess)(card.checkpointCode, allowed)) {
-                    const err = new Error('Card not found');
-                    err.status = 404;
-                    throw err;
-                }
-                const [stock, lastProgress] = await Promise.all([
-                    tx.cardStock.findFirst({
-                        where: {
-                            checkpointCode: card.checkpointCode
-                        },
-                        orderBy: {
-                            createdAt: 'desc'
-                        }
-                    }),
-                    tx.uploadBatchProgress.findFirst({
-                        where: {
-                            batchCode: card.uploadBatch.code
-                        },
-                        orderBy: {
-                            createdAt: 'desc'
-                        }
-                    })
-                ]);
+                const lastProgress = await tx.uploadBatchProgress.findFirst({
+                    where: { batchCode: card.uploadBatch.code },
+                    orderBy: { createdAt: 'desc' }
+                });
                 if (card.status === "UNVERIFIED" || card.status === "BROKEN" || card.status === "LOST") {
                     if (card.status === "UNVERIFIED") {
                         await tx.uploadBatchProgress.create({
@@ -633,6 +672,12 @@ class StockController {
                         });
                     }
                     if (nextStatus === "VERIFIED") {
+                        // Use a locked read so concurrent validations on the same checkpoint
+                        // don't both read the same amount and lose increments.
+                        const stock = await tx.cardStock.findFirst({
+                            where: { checkpointCode: card.checkpointCode },
+                            orderBy: { createdAt: 'desc' }
+                        });
                         await Promise.all([
                             tx.cardMovement.create({
                                 data: {
@@ -654,6 +699,10 @@ class StockController {
                 }
                 else if (card.status === "VERIFIED") {
                     if (nextStatus === "UNVERIFIED" || nextStatus === "BROKEN" || nextStatus === "LOST") {
+                        const stock = await tx.cardStock.findFirst({
+                            where: { checkpointCode: card.checkpointCode },
+                            orderBy: { createdAt: 'desc' }
+                        });
                         await Promise.all([
                             tx.cardMovement.create({
                                 data: {
@@ -676,6 +725,7 @@ class StockController {
                 else {
                     throw new Error('Invalid status');
                 }
+                return card;
             });
             res.status(200).json({
                 message: 'Card validated successfully',
@@ -797,55 +847,25 @@ class StockController {
                 const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
                 if (!checkpoint)
                     throw new Error('Checkpoint not found');
-                let number;
                 if (type === "SIMCARD" || type === "ESIM") {
-                    [number] = await Promise.all([
-                        tx.number.findUnique({
-                            where: {
-                                key: numberKey,
-                                status: "VERIFIED"
-                            }
-                        }),
-                        tx.number.update({
-                            where: {
-                                key: numberKey
-                            },
-                            data: {
-                                status: 'SOLD'
-                            }
-                        })
-                    ]);
+                    const number = await tx.number.findUnique({ where: { key: numberKey, status: "VERIFIED" } });
                     if (!number) {
                         throw new Error('Number not found');
                     }
                     if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
                         throw new Error('Number checkpoint code does not match checkpoint code');
                     }
+                    await tx.number.update({ where: { key: numberKey }, data: { status: 'SOLD' } });
                 }
-                let card;
                 if (type === "SIMCARD") {
-                    [card] = await Promise.all([
-                        tx.card.findUnique({
-                            where: {
-                                key: cardKey,
-                                status: "VERIFIED"
-                            }
-                        }),
-                        tx.card.update({
-                            where: {
-                                key: cardKey
-                            },
-                            data: {
-                                status: 'SOLD'
-                            }
-                        }),
-                    ]);
+                    const card = await tx.card.findUnique({ where: { key: cardKey, status: "VERIFIED" } });
                     if (!card) {
                         throw new Error('Card not found');
                     }
-                    if (checkpoint.code !== card?.checkpointCode) {
+                    if (checkpoint.code !== card.checkpointCode) {
                         throw new Error('Checkpoint code does not match card checkpoint code');
                     }
+                    await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
                     const stock = await tx.cardStock.findFirst({
                         where: {
                             checkpointCode: card.checkpointCode
@@ -980,33 +1000,34 @@ class StockController {
                         checkpoint: true,
                         merge: true
                     },
-                    orderBy: { createdAt: 'desc' }
+                    orderBy: { createdAt: sort === 'ASC' ? 'asc' : 'desc' }
                 }),
                 prisma_1.default.number.count({ where })
             ]);
-            const [totalUpload, totalAvailable] = await Promise.all([
-                prisma_1.default.number.count(),
-                prisma_1.default.number.count({
+            const numberAmountWhere = {
+                OR: [
+                    { checkpointCode: { in: checkpointFilter } },
+                    { checkpointCode: null }
+                ]
+            };
+            const mergeAmountWhere = { checkpointCode: { in: allowed } };
+            const [totalUpload, totalAvailable, totalMerge, monthlyMerge, dailyMerge] = await Promise.all([
+                prisma_1.default.number.count({ where: numberAmountWhere }),
+                prisma_1.default.number.count({ where: { ...numberAmountWhere, status: "VERIFIED" } }),
+                prisma_1.default.merge.count({ where: mergeAmountWhere }),
+                prisma_1.default.merge.count({
                     where: {
-                        status: "VERIFIED"
+                        ...mergeAmountWhere,
+                        createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
+                    }
+                }),
+                prisma_1.default.merge.count({
+                    where: {
+                        ...mergeAmountWhere,
+                        createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }
                     }
                 })
             ]);
-            const totalMerge = await prisma_1.default.merge.count();
-            const monthlyMerge = await prisma_1.default.merge.count({
-                where: {
-                    createdAt: {
-                        gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-                    }
-                }
-            });
-            const dailyMerge = await prisma_1.default.merge.count({
-                where: {
-                    createdAt: {
-                        gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())
-                    }
-                }
-            });
             res.status(200).json({
                 message: 'Numbers retrieved successfully',
                 data: {
@@ -1132,29 +1153,21 @@ class StockController {
                     lte: new Date(new Date(endSoldAt).setHours(23, 59, 59, 999))
                 };
             }
-            if (cardRemark) {
-                where.number = {
-                    remark: cardRemark
-                };
+            const isSimcardQuery = type === "SIMCARD" || !type;
+            if (cardRemark && isSimcardQuery) {
+                where.number = { remark: cardRemark };
             }
-            if (search) {
-                where.number = {
-                    ...where.number,
-                    key: {
-                        contains: search
-                    }
-                };
+            if (search && isSimcardQuery) {
+                where.number = { ...where.number, key: { contains: search } };
             }
             let merges;
-            if (type === "SIMCARD" || !type) {
+            if (isSimcardQuery) {
                 merges = await prisma_1.default.merge.findMany({
                     skip: (Number(page) - 1) * Number(limit),
                     take: Number(limit),
                     orderBy: { createdAt: 'desc' },
                     where,
-                    include: {
-                        number: true
-                    }
+                    include: { number: true }
                 });
             }
             else {
@@ -1184,17 +1197,13 @@ class StockController {
                 message: 'Merges retrieved successfully',
                 data: {
                     merges,
-                    amount: {
-                        total,
-                        monthly,
-                        daily
-                    },
-                    pagination: {
-                        page: Number(page),
-                        limit: Number(limit),
-                        total,
-                        pages: Math.ceil(total / Number(limit))
-                    }
+                    amount: { total, monthly, daily }
+                },
+                pagination: {
+                    page: Number(page),
+                    limit: Number(limit),
+                    total,
+                    pages: Math.ceil(total / Number(limit))
                 }
             });
         }

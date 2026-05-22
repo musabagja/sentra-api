@@ -382,8 +382,9 @@ class OpnameController {
         : [];
 
       const countMap = updateCounts.reduce((acc, row) => {
-        if (!acc[row.opnameID]) acc[row.opnameID] = { OK: 0, BROKEN: 0, LOST: 0 };
-        acc[row.opnameID][row.status as 'OK' | 'BROKEN' | 'LOST'] = row._count.status;
+        const entry = acc[row.opnameID] ?? { OK: 0, BROKEN: 0, LOST: 0 };
+        entry[row.status as 'OK' | 'BROKEN' | 'LOST'] = row._count.status;
+        acc[row.opnameID] = entry;
         return acc;
       }, {} as Record<number, { OK: number; BROKEN: number; LOST: number }>);
 

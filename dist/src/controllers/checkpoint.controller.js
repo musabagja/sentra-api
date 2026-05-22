@@ -4,13 +4,32 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const prisma_1 = __importDefault(require("../../lib/prisma"));
+const enums_1 = require("../../generated/prisma/enums");
 const access_util_1 = require("../utils/access.util");
 class CheckpointController {
     static async createCheckpoint(req, res, next) {
         try {
             const { code, type, name } = req.body;
-            const checkpoint = await prisma_1.default.checkpoint.create({
-                data: { code, type, name }
+            if (!code || !type || !name) {
+                const err = new Error('code, type, and name are required');
+                err.status = 400;
+                throw err;
+            }
+            const validTypes = Object.values(enums_1.CheckpointType);
+            if (!validTypes.includes(type)) {
+                const err = new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
+                err.status = 400;
+                throw err;
+            }
+            const checkpoint = await prisma_1.default.$transaction(async (tx) => {
+                const checkpoint = await tx.checkpoint.create({
+                    data: { code, type, name }
+                });
+                // Link the new checkpoint to the creator's circle so it's immediately visible
+                await tx.checkpointCircle.create({
+                    data: { checkpointCode: code, circleCode: req.user.circleCode }
+                });
+                return checkpoint;
             });
             res.status(201).json({
                 message: 'Checkpoint created successfully',
@@ -23,7 +42,7 @@ class CheckpointController {
     }
     static async getCheckpoints(req, res, next) {
         try {
-            const { page = 1, limit = 10, type, search, startSoldAt, endSoldAt } = req.query;
+            const { page = 1, limit, type, search, startSoldAt, endSoldAt } = req.query;
             const allowed = req.checkpointCodes ?? [];
             const where = {
                 // Scope to the checkpoints the user's circle covers
@@ -51,10 +70,13 @@ class CheckpointController {
                     lte: new Date(new Date(endSoldAt).setHours(23, 59, 59, 999))
                 };
             }
+            const paginated = limit !== undefined;
             const findManyOptions = {
                 where,
-                skip: (Number(page) - 1) * Number(limit),
-                take: Number(limit),
+                ...(paginated && {
+                    skip: (Number(page) - 1) * Number(limit),
+                    take: Number(limit),
+                }),
                 include: {
                     _count: {
                         select: {
@@ -72,12 +94,14 @@ class CheckpointController {
             res.status(200).json({
                 message: 'Checkpoints retrieved successfully',
                 data: { checkpoints },
-                pagination: {
-                    page: Number(page),
-                    limit: Number(limit),
-                    total,
-                    pages: Math.ceil(total / Number(limit))
-                }
+                ...(paginated && {
+                    pagination: {
+                        page: Number(page),
+                        limit: Number(limit),
+                        total,
+                        pages: Math.ceil(total / Number(limit))
+                    }
+                })
             });
         }
         catch (error) {
@@ -92,12 +116,12 @@ class CheckpointController {
                 where: { id: Number(id) },
                 include: {
                     cards: {
-                        include: {
-                            movements: {
-                                orderBy: { createdAt: 'desc' },
-                                take: 5
-                            }
-                        }
+                        take: 20,
+                        orderBy: { createdAt: 'desc' }
+                    },
+                    cardStock: {
+                        take: 1,
+                        orderBy: { createdAt: 'desc' }
                     },
                     _count: { select: { cards: true } }
                 }
@@ -127,8 +151,16 @@ class CheckpointController {
     static async updateCheckpoint(req, res, next) {
         try {
             const { id } = req.params;
-            const { code, type, name } = req.body;
+            const { type, name } = req.body;
             const allowed = req.checkpointCodes ?? [];
+            if (type) {
+                const validTypes = Object.values(enums_1.CheckpointType);
+                if (!validTypes.includes(type)) {
+                    const err = new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
+                    err.status = 400;
+                    throw err;
+                }
+            }
             const existing = await prisma_1.default.checkpoint.findUnique({ where: { id: Number(id) } });
             if (!existing || !(0, access_util_1.hasCheckpointAccess)(existing.code, allowed)) {
                 const err = new Error('Checkpoint not found');
@@ -138,7 +170,6 @@ class CheckpointController {
             const checkpoint = await prisma_1.default.checkpoint.update({
                 where: { id: Number(id) },
                 data: {
-                    ...(code && { code }),
                     ...(type && { type }),
                     ...(name && { name })
                 }
@@ -162,7 +193,29 @@ class CheckpointController {
                 err.status = 404;
                 throw err;
             }
-            await prisma_1.default.checkpoint.delete({ where: { id: Number(id) } });
+            const [cardCount, distributionCount] = await Promise.all([
+                prisma_1.default.card.count({ where: { checkpointCode: existing.code } }),
+                prisma_1.default.distribution.count({
+                    where: {
+                        OR: [{ sourceCode: existing.code }, { targetCode: existing.code }]
+                    }
+                })
+            ]);
+            if (cardCount > 0) {
+                const err = new Error(`Cannot delete checkpoint: ${cardCount} card(s) are assigned to it`);
+                err.status = 400;
+                throw err;
+            }
+            if (distributionCount > 0) {
+                const err = new Error(`Cannot delete checkpoint: ${distributionCount} distribution(s) reference it`);
+                err.status = 400;
+                throw err;
+            }
+            await prisma_1.default.$transaction(async (tx) => {
+                await tx.cardStock.deleteMany({ where: { checkpointCode: existing.code } });
+                await tx.checkpointCircle.deleteMany({ where: { checkpointCode: existing.code } });
+                await tx.checkpoint.delete({ where: { id: existing.id } });
+            });
             res.status(200).json({ message: 'Checkpoint deleted successfully' });
         }
         catch (error) {

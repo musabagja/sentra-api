@@ -55,24 +55,21 @@ const upload = (type) => (0, multer_1.default)({
         fileSize: 5 * 1024 * 1024, // 5MB limit
     },
 });
-// Middleware to generate URLs for uploaded images and attach to req.body
+// Middleware to generate URLs for uploaded images and attach to req.body.
+// Single-file fields produce a string; multi-file fields produce an array.
+// "File" suffix is stripped and replaced with "URL" (signFile → signURL).
 const generateImageURLs = (req, res, next) => {
     const files = req.files;
     if (files) {
         Object.keys(files).forEach(fieldname => {
             const fileArray = files[fieldname];
-            if (fileArray && fileArray.length > 0) {
-                const file = fileArray[0];
-                if (file) {
-                    const url = `/uploads/${file.originalname}`;
-                    // Strip "File" suffix and replace with "URL"
-                    // imageFile -> imageURL, signFile -> signURL, avatarFile -> avatarURL
-                    const urlKey = fieldname.endsWith("File")
-                        ? `${fieldname.slice(0, -4)}URL`
-                        : `${fieldname}URL`;
-                    req.body[urlKey] = url;
-                }
-            }
+            if (!fileArray || fileArray.length === 0)
+                return;
+            const urlKey = fieldname.endsWith("File")
+                ? `${fieldname.slice(0, -4)}URL`
+                : `${fieldname}URL`;
+            const urls = fileArray.map(f => `/uploads/${f.originalname}`);
+            req.body[urlKey] = urls.length === 1 ? urls[0] : urls;
         });
     }
     next();

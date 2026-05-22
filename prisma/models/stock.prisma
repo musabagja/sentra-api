@@ -79,6 +79,7 @@ model Checkpoint {
   merges                  Merge[]
   mergeAdditionals        MergeAdditional[]
   checkpointCircles       CheckpointCircle[]
+  opnames                 Opname[]
 }
 
 model Card {
@@ -325,8 +326,9 @@ model Opname {
   userCode       String
   createdAt      DateTime       @default(now())
 
-  updates OpnameUpdate[]
-  user    User           @relation(fields: [userCode], references: [code])
+  updates     OpnameUpdate[]
+  user        User              @relation(fields: [userCode], references: [code])
+  checkpoint  Checkpoint        @relation(fields: [checkpointCode], references: [code])
   submittance OpnameSubmittance?
 }
 

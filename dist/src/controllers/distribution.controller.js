@@ -105,21 +105,33 @@ class DistributionController {
         try {
             const { page = 1, limit = 10, status, sourceCode, targetCode, startDueDate, endDueDate } = req.query;
             const allowed = req.checkpointCodes ?? [];
-            // A user sees distributions where they own either end (source or target)
+            // Base access scope: user sees distributions where they own either end (source or target).
+            // Specific filters are AND-appended on top — kept separate so they don't collapse into
+            // an OR that returns results matching only one side when both filters are provided.
             const where = {
-                AND: [{
+                AND: [
+                    {
                         OR: [
-                            { sourceCode: { in: (0, access_util_1.resolveCheckpointFilter)(sourceCode, allowed) } },
-                            { targetCode: { in: (0, access_util_1.resolveCheckpointFilter)(targetCode, allowed) } }
+                            { sourceCode: { in: allowed } },
+                            { targetCode: { in: allowed } }
                         ]
-                    }]
+                    }
+                ]
             };
             if (status)
-                where.status = status;
-            if (startDueDate)
-                where.scheduledAt = { gte: new Date(startDueDate) };
-            if (endDueDate)
-                where.scheduledAt = { lte: new Date(endDueDate) };
+                where.AND.push({ status });
+            if (sourceCode)
+                where.AND.push({ sourceCode: sourceCode });
+            if (targetCode)
+                where.AND.push({ targetCode: targetCode });
+            if (startDueDate || endDueDate) {
+                where.AND.push({
+                    scheduledAt: {
+                        ...(startDueDate && { gte: new Date(startDueDate) }),
+                        ...(endDueDate && { lte: new Date(endDueDate) })
+                    }
+                });
+            }
             const [distributions, total] = await Promise.all([
                 prisma_1.default.distribution.findMany({
                     where,
@@ -201,9 +213,9 @@ class DistributionController {
                 if (!status) {
                     throw new Error('Status is required');
                 }
-                const allowedStatuses = ["SCHEDULED", "HOLD", "DELIVERED"];
+                const allowedStatuses = ["SCHEDULED", "HOLD"];
                 if (!allowedStatuses.includes(status)) {
-                    throw new Error('Invalid distribution status');
+                    throw new Error('Invalid distribution status. Use the submit endpoint to mark as delivered, or the cancel endpoint to cancel');
                 }
                 const distribution = await tx.distribution.findUnique({
                     where: { id: Number(id) },
@@ -339,6 +351,27 @@ class DistributionController {
                 if (distribution.status === "DELIVERED") {
                     throw new Error('Distribution is already completed');
                 }
+                const itemKeys = distribution.items.map(item => item.itemKey);
+                // Validate before writing — if cards are gone the transaction rolls back cleanly
+                const [holdCount, sourceStock, targetStock] = await Promise.all([
+                    tx.card.count({
+                        where: { key: { in: itemKeys }, checkpointCode: distribution.sourceCode, status: 'HOLD' }
+                    }),
+                    tx.cardStock.findFirst({
+                        where: { checkpointCode: distribution.sourceCode },
+                        orderBy: { createdAt: 'desc' }
+                    }),
+                    tx.cardStock.findFirst({
+                        where: { checkpointCode: distribution.targetCode },
+                        orderBy: { createdAt: 'desc' }
+                    })
+                ]);
+                if (holdCount !== itemKeys.length) {
+                    throw new Error('Some cards are no longer available for distribution');
+                }
+                if (!sourceStock) {
+                    throw new Error('Source checkpoint has no stock record');
+                }
                 const submittance = await tx.distributionSubmittance.create({
                     data: {
                         distributionID: Number(id),
@@ -360,28 +393,6 @@ class DistributionController {
                         completedAt: new Date()
                     }
                 });
-                const itemKeys = distribution.items.map(item => item.itemKey);
-                const [sourceStock, targetStock] = await Promise.all([
-                    tx.cardStock.findFirst({
-                        where: {
-                            checkpointCode: distribution.sourceCode
-                        },
-                        orderBy: {
-                            createdAt: 'desc'
-                        }
-                    }),
-                    tx.cardStock.findFirst({
-                        where: {
-                            checkpointCode: distribution.targetCode
-                        },
-                        orderBy: {
-                            createdAt: 'desc'
-                        }
-                    })
-                ]);
-                if (!sourceStock || Number(sourceStock.amount) < itemKeys.length) {
-                    throw new Error('Insufficient source stock');
-                }
                 await Promise.all([
                     tx.card.updateMany({
                         where: {
@@ -397,13 +408,13 @@ class DistributionController {
                     tx.cardStock.create({
                         data: {
                             checkpointCode: distribution.sourceCode,
-                            amount: Number(sourceStock.amount) - itemKeys.length
+                            amount: sourceStock.amount - itemKeys.length
                         }
                     }),
                     tx.cardStock.create({
                         data: {
                             checkpointCode: distribution.targetCode,
-                            amount: Number(targetStock?.amount || 0) + itemKeys.length
+                            amount: (targetStock?.amount ?? 0) + itemKeys.length
                         }
                     }),
                     tx.cardMovement.createMany({
@@ -431,7 +442,10 @@ class DistributionController {
         try {
             const { id } = req.params;
             const allowed = req.checkpointCodes ?? [];
-            const existing = await prisma_1.default.distribution.findUnique({ where: { id: Number(id) } });
+            const existing = await prisma_1.default.distribution.findUnique({
+                where: { id: Number(id) },
+                include: { items: true }
+            });
             if (!existing ||
                 (!(0, access_util_1.hasCheckpointAccess)(existing.sourceCode, allowed) &&
                     !(0, access_util_1.hasCheckpointAccess)(existing.targetCode, allowed))) {
@@ -439,8 +453,24 @@ class DistributionController {
                 err.status = 404;
                 throw err;
             }
-            await prisma_1.default.distribution.delete({
-                where: { id: Number(id) }
+            if (existing.status === 'DELIVERED') {
+                const err = new Error('Cannot delete a delivered distribution');
+                err.status = 400;
+                throw err;
+            }
+            const itemKeys = existing.items.map(i => i.itemKey);
+            await prisma_1.default.$transaction(async (tx) => {
+                // Restore HOLD cards back to VERIFIED
+                if (itemKeys.length > 0) {
+                    await tx.card.updateMany({
+                        where: { key: { in: itemKeys }, status: 'HOLD' },
+                        data: { status: 'VERIFIED' }
+                    });
+                    await tx.distributionItem.deleteMany({ where: { distributionID: existing.id } });
+                }
+                // Remove submittance if it exists (CANCELLED distributions shouldn't have one, but guard anyway)
+                await tx.distributionSubmittance.deleteMany({ where: { distributionID: existing.id } });
+                await tx.distribution.delete({ where: { id: existing.id } });
             });
             res.status(200).json({
                 message: 'Distribution deleted successfully'

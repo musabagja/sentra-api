@@ -48,7 +48,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NullsOrder = exports.QueryMode = exports.SortOrder = exports.CheckpointCircleScalarFieldEnum = exports.CircleScalarFieldEnum = exports.SessionScalarFieldEnum = exports.PermissionScalarFieldEnum = exports.AccessScalarFieldEnum = exports.UserScalarFieldEnum = exports.OpnameUpdateScalarFieldEnum = exports.OpnameScalarFieldEnum = exports.DistributionItemScalarFieldEnum = exports.DistributionSubmittanceScalarFieldEnum = exports.DistributionScalarFieldEnum = exports.NumberMovementScalarFieldEnum = exports.CardMovementScalarFieldEnum = exports.CardStockScalarFieldEnum = exports.MergeAdditionalScalarFieldEnum = exports.MergeScalarFieldEnum = exports.UploadBatchProgressScalarFieldEnum = exports.UploadBatchScalarFieldEnum = exports.NumberScalarFieldEnum = exports.CardScalarFieldEnum = exports.CheckpointScalarFieldEnum = exports.TransactionIsolationLevel = exports.ModelName = exports.AnyNull = exports.JsonNull = exports.DbNull = exports.NullTypes = exports.Decimal = void 0;
+exports.NullsOrder = exports.QueryMode = exports.SortOrder = exports.CheckpointCircleScalarFieldEnum = exports.CircleScalarFieldEnum = exports.SessionScalarFieldEnum = exports.PermissionScalarFieldEnum = exports.AccessScalarFieldEnum = exports.UserScalarFieldEnum = exports.OpnameUpdateScalarFieldEnum = exports.OpnameSubmittanceDocumentationScalarFieldEnum = exports.OpnameSubmittanceScalarFieldEnum = exports.OpnameScalarFieldEnum = exports.DistributionItemScalarFieldEnum = exports.DistributionSubmittanceScalarFieldEnum = exports.DistributionScalarFieldEnum = exports.NumberMovementScalarFieldEnum = exports.CardMovementScalarFieldEnum = exports.CardStockScalarFieldEnum = exports.MergeAdditionalScalarFieldEnum = exports.MergeScalarFieldEnum = exports.UploadBatchProgressScalarFieldEnum = exports.UploadBatchScalarFieldEnum = exports.NumberScalarFieldEnum = exports.CardScalarFieldEnum = exports.CheckpointScalarFieldEnum = exports.TransactionIsolationLevel = exports.ModelName = exports.AnyNull = exports.JsonNull = exports.DbNull = exports.NullTypes = exports.Decimal = void 0;
 const runtime = __importStar(require("@prisma/client/runtime/index-browser"));
 exports.Decimal = runtime.Decimal;
 exports.NullTypes = {
@@ -89,6 +89,8 @@ exports.ModelName = {
     DistributionSubmittance: 'DistributionSubmittance',
     DistributionItem: 'DistributionItem',
     Opname: 'Opname',
+    OpnameSubmittance: 'OpnameSubmittance',
+    OpnameSubmittanceDocumentation: 'OpnameSubmittanceDocumentation',
     OpnameUpdate: 'OpnameUpdate',
     User: 'User',
     Access: 'Access',
@@ -245,6 +247,23 @@ exports.OpnameScalarFieldEnum = {
     type: 'type',
     checkpointCode: 'checkpointCode',
     userCode: 'userCode',
+    createdAt: 'createdAt'
+};
+exports.OpnameSubmittanceScalarFieldEnum = {
+    id: 'id',
+    opnameID: 'opnameID',
+    userCode: 'userCode',
+    signURL: 'signURL',
+    picSignURL: 'picSignURL',
+    picName: 'picName',
+    documentationURL: 'documentationURL',
+    note: 'note',
+    createdAt: 'createdAt'
+};
+exports.OpnameSubmittanceDocumentationScalarFieldEnum = {
+    id: 'id',
+    submittanceID: 'submittanceID',
+    url: 'url',
     createdAt: 'createdAt'
 };
 exports.OpnameUpdateScalarFieldEnum = {
