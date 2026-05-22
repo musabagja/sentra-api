@@ -681,17 +681,18 @@ class StockController {
                         });
                     }
                     if (nextStatus === "VERIFIED") {
-                        // Use a locked read so concurrent validations on the same checkpoint
-                        // don't both read the same amount and lose increments.
                         const stock = await tx.cardStock.findFirst({
                             where: { checkpointCode: card.checkpointCode },
                             orderBy: { createdAt: 'desc' }
                         });
+                        // UNVERIFIED → VERIFIED is the first time a card enters stock (INITIAL).
+                        // BROKEN/LOST → VERIFIED is a re-entry after removal (RETURN).
+                        const movementType = card.status === "UNVERIFIED" ? "INITIAL" : "RETURN";
                         await Promise.all([
                             tx.cardMovement.create({
                                 data: {
                                     cardID: card.id,
-                                    type: "INITIAL",
+                                    type: movementType,
                                     userCode: req.user.code,
                                     sourceCode: null,
                                     targetCode: card.checkpointCode
@@ -1181,8 +1182,13 @@ class StockController {
             if (cardRemark && isSimcardQuery) {
                 where.number = { remark: cardRemark };
             }
-            if (search && isSimcardQuery) {
-                where.number = { ...where.number, key: { contains: search } };
+            if (search) {
+                if (isSimcardQuery) {
+                    where.number = { ...where.number, key: { contains: search } };
+                }
+                else {
+                    where.cardKey = { contains: search };
+                }
             }
             let merges;
             if (isSimcardQuery) {

@@ -18,6 +18,10 @@ class DistributionController {
                 throw new Error('Cards must be an array');
             if (cardKeys.length === 0)
                 throw new Error('Cards array cannot be empty');
+            if (!scheduledAt)
+                throw new Error('scheduledAt is required');
+            if (isNaN(new Date(scheduledAt).getTime()))
+                throw new Error('scheduledAt is not a valid date');
             const allowed = req.checkpointCodes ?? [];
             const [distributions, cards, missingKeys] = await prisma_1.default.$transaction(async (tx) => {
                 const user = req.user;
@@ -57,12 +61,11 @@ class DistributionController {
                 const nextId = lastDistribution && lastDistribution.batch ? parseInt(lastDistribution.batch.replace('DV-', '')) + 1 : 1;
                 const nextBatch = `DV-${nextId.toString()}`;
                 const cardsBySource = foundCards.reduce((acc, card) => {
-                    const key = card.checkpointCode;
-                    if (!key)
-                        throw new Error(`Card ${card.key} has no checkpoint assigned and cannot be distributed`);
-                    if (!acc[key])
-                        acc[key] = [];
-                    acc[key].push(card);
+                    const group = acc[card.checkpointCode];
+                    if (group)
+                        group.push(card);
+                    else
+                        acc[card.checkpointCode] = [card];
                     return acc;
                 }, {});
                 const distributions = await Promise.all(Object.entries(cardsBySource).map(([sourceCode, groupedCards]) => tx.distribution.create({
@@ -217,13 +220,7 @@ class DistributionController {
                 }
                 const distribution = await tx.distribution.findUnique({
                     where: { id: Number(id) },
-                    include: {
-                        items: {
-                            include: {
-                                card: true
-                            }
-                        }
-                    }
+                    include: { items: true }
                 });
                 if (!distribution ||
                     (!(0, access_util_1.hasCheckpointAccess)(distribution.sourceCode, allowed) &&
@@ -249,13 +246,7 @@ class DistributionController {
                         status,
                         ...(scheduledAt !== undefined && { scheduledAt: new Date(scheduledAt) })
                     },
-                    include: {
-                        items: {
-                            include: {
-                                card: true
-                            }
-                        }
-                    }
+                    include: { items: true }
                 });
             });
             res.status(200).json({
@@ -447,7 +438,7 @@ class DistributionController {
             }
             const itemKeys = existing.items.map(i => i.itemKey);
             await prisma_1.default.$transaction(async (tx) => {
-                // Restore HOLD cards back to VERIFIED
+                // Restore DELIVERY cards back to VERIFIED
                 if (itemKeys.length > 0) {
                     await tx.card.updateMany({
                         where: { key: { in: itemKeys }, status: 'DELIVERY' },

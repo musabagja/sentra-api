@@ -14,6 +14,8 @@ class DistributionController {
       if (!req.user) throw new Error('User not found');
       if (!Array.isArray(cardKeys)) throw new Error('Cards must be an array');
       if (cardKeys.length === 0) throw new Error('Cards array cannot be empty');
+      if (!scheduledAt) throw new Error('scheduledAt is required');
+      if (isNaN(new Date(scheduledAt).getTime())) throw new Error('scheduledAt is not a valid date');
 
       const allowed = req.checkpointCodes ?? [];
 
@@ -66,10 +68,9 @@ class DistributionController {
         const nextBatch = `DV-${nextId.toString()}`;
 
         const cardsBySource = foundCards.reduce((acc, card) => {
-          const key = card.checkpointCode;
-          if (!key) throw new Error(`Card ${card.key} has no checkpoint assigned and cannot be distributed`);
-          if (!acc[key]) acc[key] = [];
-          acc[key].push(card);
+          const group = acc[card.checkpointCode];
+          if (group) group.push(card);
+          else acc[card.checkpointCode] = [card];
           return acc;
         }, {} as Record<string, typeof foundCards>);
 
@@ -237,13 +238,7 @@ class DistributionController {
 
         const distribution = await tx.distribution.findUnique({
           where: { id: Number(id) },
-          include: {
-            items: {
-              include: {
-                card: true
-              }
-            }
-          }
+          include: { items: true }
         });
 
         if (
@@ -276,13 +271,7 @@ class DistributionController {
             status,
             ...(scheduledAt !== undefined && { scheduledAt: new Date(scheduledAt) })
           },
-          include: {
-            items: {
-              include: {
-                card: true
-              }
-            }
-          }
+          include: { items: true }
         });
       });
 
@@ -515,7 +504,7 @@ class DistributionController {
       const itemKeys = existing.items.map(i => i.itemKey);
 
       await prisma.$transaction(async (tx) => {
-        // Restore HOLD cards back to VERIFIED
+        // Restore DELIVERY cards back to VERIFIED
         if (itemKeys.length > 0) {
           await tx.card.updateMany({
             where: { key: { in: itemKeys }, status: 'DELIVERY' },
