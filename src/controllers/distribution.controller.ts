@@ -12,6 +12,7 @@ class DistributionController {
       const { targetCode, scheduledAt, cardKeys } = req.body;
 
       if (!req.user) throw new Error('User not found');
+      if (!targetCode) throw new Error('targetCode is required');
       if (!Array.isArray(cardKeys)) throw new Error('Cards must be an array');
       if (cardKeys.length === 0) throw new Error('Cards array cannot be empty');
       if (!scheduledAt) throw new Error('scheduledAt is required');
@@ -222,11 +223,6 @@ class DistributionController {
       const allowed = req.checkpointCodes ?? [];
 
       const updatedDistribution = await prisma.$transaction(async (tx) => {
-        const user = req.user;
-        if (!user) {
-          throw new Error('User not found');
-        }
-
         if (!status) {
           throw new Error('Status is required');
         }
@@ -248,6 +244,18 @@ class DistributionController {
         ) {
           const err = new Error('Distribution not found');
           (err as any).status = 404;
+          throw err;
+        }
+
+        if (distribution.status === 'DELIVERED') {
+          const err = new Error('Cannot modify a delivered distribution');
+          (err as any).status = 400;
+          throw err;
+        }
+
+        if (distribution.status === 'CANCELLED') {
+          const err = new Error('Cannot modify a cancelled distribution');
+          (err as any).status = 400;
           throw err;
         }
 

@@ -54,11 +54,8 @@ class OpnameController {
           throw new Error('Card has already been scanned in this opname');
         }
 
-        const [opnameProgresses, cardStock] = await Promise.all([
-          tx.opnameUpdate.findMany({
-            where: { opnameID: Number(id) },
-            select: { itemID: true }
-          }),
+        const [scannedCount, cardStock] = await Promise.all([
+          tx.opnameUpdate.count({ where: { opnameID: Number(id) } }),
           tx.cardStock.findFirst({
             where: { checkpointCode: opname.checkpointCode },
             orderBy: { createdAt: 'desc' }
@@ -68,9 +65,6 @@ class OpnameController {
         if (!cardStock) {
           throw new Error('Card stock not found');
         }
-
-        // Count unique cards scanned so far; the new card (not yet inserted) adds 1
-        const uniqueScannedCount = new Set(opnameProgresses.map(u => u.itemID)).size;
 
         await tx.opnameUpdate.create({
           data: {
@@ -97,7 +91,7 @@ class OpnameController {
 
         return await tx.opname.update({
           where: { id: Number(id) },
-          data: { progress: uniqueScannedCount + 1 }
+          data: { progress: scannedCount + 1 }
         });
       });
 
@@ -118,8 +112,15 @@ class OpnameController {
 
   static async createOpname(req: Request, res: Response, next: NextFunction) {
     try {
-      const { checkpointCode } = req.body;
+      const { checkpointCode, type = 'ICCID' } = req.body;
       const allowed = req.checkpointCodes ?? [];
+
+      const validTypes = ['ICCID', 'MSISDN'];
+      if (!validTypes.includes(type)) {
+        const err = new Error(`Invalid opname type. Must be one of: ${validTypes.join(', ')}`);
+        (err as any).status = 400;
+        throw err;
+      }
 
       if (!hasCheckpointAccess(checkpointCode, allowed)) {
         const err = new Error('Checkpoint not found');
@@ -129,33 +130,26 @@ class OpnameController {
 
       const opname = await prisma.$transaction(async (tx) => {
         const checkpoint = await tx.checkpoint.findUnique({
-          where: {
-            code: checkpointCode
-          }
+          where: { code: checkpointCode }
         });
-  
+
         if (!checkpoint) {
           throw new Error('Checkpoint not found');
         }
-  
+
         const runningOpname = await tx.opname.findFirst({
-          where: {
-            checkpointCode: checkpointCode,
-            status: "ONGOING"
-          },
-          orderBy: {
-            createdAt: 'desc'
-          }
+          where: { checkpointCode, status: "ONGOING" },
+          orderBy: { createdAt: 'desc' }
         });
-  
+
         if (runningOpname) {
           throw new Error('Opname is already running');
         }
-  
+
         const [amount, lastOpname] = await Promise.all([
-          tx.card.count({
-            where: { checkpointCode, status: 'VERIFIED' }
-          }),
+          type === 'ICCID'
+            ? tx.card.count({ where: { checkpointCode, status: 'VERIFIED' } })
+            : tx.number.count({ where: { checkpointCode, status: 'VERIFIED' } }),
           tx.opname.findFirst({
             where: { checkpointCode },
             orderBy: { createdAt: 'desc' }
@@ -164,18 +158,25 @@ class OpnameController {
         const nextBatchNum = lastOpname?.batch ? Number(lastOpname.batch.split('/')[2]) + 1 : 1;
         const batch = `OP/${checkpointCode}/${nextBatchNum}`;
 
-        // Mark all VERIFIED cards at this checkpoint as OPNAME so they're scoped to this session
-        await tx.card.updateMany({
-          where: { checkpointCode, status: 'VERIFIED' },
-          data: { status: 'OPNAME' }
-        });
+        // Mark all VERIFIED items at this checkpoint as OPNAME so they're scoped to this session
+        if (type === 'ICCID') {
+          await tx.card.updateMany({
+            where: { checkpointCode, status: 'VERIFIED' },
+            data: { status: 'OPNAME' }
+          });
+        } else {
+          await tx.number.updateMany({
+            where: { checkpointCode, status: 'VERIFIED' },
+            data: { status: 'OPNAME' }
+          });
+        }
 
         const opname = await tx.opname.create({
           data: {
             amount,
             progress: 0,
             batch,
-            type: "ICCID",
+            type,
             checkpointCode,
             status: "ONGOING",
             userCode: req.user!.code
@@ -561,17 +562,30 @@ class OpnameController {
           u => u.status === 'BROKEN' || u.status === 'LOST'
         ).length;
 
-        // Revert all scanned cards + remaining OPNAME cards back to VERIFIED
-        await tx.card.updateMany({
-          where: {
-            checkpointCode: existing.checkpointCode,
-            OR: [
-              { status: 'OPNAME' },
-              ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
-            ]
-          },
-          data: { status: 'VERIFIED' }
-        });
+        // Revert all scanned items + remaining OPNAME items back to VERIFIED
+        if (existing.type === 'ICCID') {
+          await tx.card.updateMany({
+            where: {
+              checkpointCode: existing.checkpointCode,
+              OR: [
+                { status: 'OPNAME' },
+                ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
+              ]
+            },
+            data: { status: 'VERIFIED' }
+          });
+        } else {
+          await tx.number.updateMany({
+            where: {
+              checkpointCode: existing.checkpointCode,
+              OR: [
+                { status: 'OPNAME' },
+                ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
+              ]
+            },
+            data: { status: 'VERIFIED' }
+          });
+        }
 
         // Restore stock for BROKEN/LOST scans (each decremented stock during scanning)
         if (damagedCount > 0) {
@@ -631,17 +645,30 @@ class OpnameController {
             u => u.status === 'BROKEN' || u.status === 'LOST'
           ).length;
 
-          // Restore all OPNAME cards + any already-scanned BROKEN/LOST cards back to VERIFIED
-          await tx.card.updateMany({
-            where: {
-              checkpointCode: existing.checkpointCode,
-              OR: [
-                { status: 'OPNAME' },
-                ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
-              ]
-            },
-            data: { status: 'VERIFIED' }
-          });
+          // Restore all OPNAME items + any already-scanned BROKEN/LOST items back to VERIFIED
+          if (existing.type === 'ICCID') {
+            await tx.card.updateMany({
+              where: {
+                checkpointCode: existing.checkpointCode,
+                OR: [
+                  { status: 'OPNAME' },
+                  ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
+                ]
+              },
+              data: { status: 'VERIFIED' }
+            });
+          } else {
+            await tx.number.updateMany({
+              where: {
+                checkpointCode: existing.checkpointCode,
+                OR: [
+                  { status: 'OPNAME' },
+                  ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
+                ]
+              },
+              data: { status: 'VERIFIED' }
+            });
+          }
 
           if (damagedCount > 0) {
             const cardStock = await tx.cardStock.findFirst({
