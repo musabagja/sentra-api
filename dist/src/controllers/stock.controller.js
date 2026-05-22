@@ -63,9 +63,9 @@ class StockController {
                     where: { code: { in: allowed } },
                     include: { cardStock: { orderBy: { createdAt: 'desc' }, take: 1 } }
                 }),
-                // 5a. Base initial stock: VERIFIED + SOLD + HOLD
+                // 5a. Base initial stock: VERIFIED + SOLD + DELIVERY + OPNAME
                 prisma_1.default.card.count({
-                    where: { checkpointCode: { in: allowed }, status: { in: ['VERIFIED', 'SOLD', 'HOLD'] } }
+                    where: { checkpointCode: { in: allowed }, status: { in: ['VERIFIED', 'SOLD', 'DELIVERY', 'OPNAME'] } }
                 }),
                 // 5b. BROKEN/LOST candidates — need to check if opname-traced
                 prisma_1.default.card.findMany({
@@ -475,7 +475,7 @@ class StockController {
                 err.status = 404;
                 throw err;
             }
-            if (existing.status === 'SOLD' || existing.status === 'HOLD') {
+            if (existing.status === 'SOLD' || existing.status === 'DELIVERY' || existing.status === 'OPNAME') {
                 const err = new Error(`Cannot delete a ${existing.status.toLowerCase()} card`);
                 err.status = 400;
                 throw err;

@@ -38,12 +38,8 @@ class OpnameController {
           throw new Error('Card not found');
         }
 
-        if (card.status === "SOLD") {
-          throw new Error('Card is sold');
-        }
-
-        if (card.status === "UNVERIFIED") {
-          throw new Error('Card is not verified');
+        if (card.status !== "OPNAME") {
+          throw new Error('Card is not part of this opname');
         }
 
         if (card.checkpointCode !== opname.checkpointCode) {
@@ -85,21 +81,12 @@ class OpnameController {
           }
         });
 
-        // Adjust stock only when the physical state differs from the system state.
-        // card.status is the system truth; status is the physical observation.
-        if (card.status === "VERIFIED" && (status === "BROKEN" || status === "LOST")) {
-          // Physically missing/broken but system says VERIFIED → decrement
+        // All OPNAME cards were VERIFIED before the opname started.
+        // Decrement stock only when physically damaged or missing.
+        if (status === "BROKEN" || status === "LOST") {
           await tx.cardStock.create({
             data: {
               amount: cardStock.amount - 1,
-              checkpointCode: opname.checkpointCode
-            }
-          });
-        } else if (card.status !== "VERIFIED" && status === "OK") {
-          // Physically present and OK but system says not VERIFIED → increment
-          await tx.cardStock.create({
-            data: {
-              amount: cardStock.amount + 1,
               checkpointCode: opname.checkpointCode
             }
           });
@@ -162,32 +149,24 @@ class OpnameController {
           throw new Error('Opname is already running');
         }
   
-        const cardStock = await tx.cardStock.findFirst({
-          where: {
-            checkpointCode: checkpointCode
-          },
-          orderBy: {
-            createdAt: 'desc'
-          }
-        });
-  
-        const lastOpname = await tx.opname.findFirst({
-          where: {
-            checkpointCode: checkpointCode
-          },
-          orderBy: {
-            createdAt: 'desc'
-          }
-        });
-  
-        if (!cardStock) {
-          throw new Error('Card stock not found');
-        }
-  
-        const amount = cardStock.amount;
+        const [amount, lastOpname] = await Promise.all([
+          tx.card.count({
+            where: { checkpointCode, status: 'VERIFIED' }
+          }),
+          tx.opname.findFirst({
+            where: { checkpointCode },
+            orderBy: { createdAt: 'desc' }
+          })
+        ]);
         const nextBatchNum = lastOpname?.batch ? Number(lastOpname.batch.split('/')[2]) + 1 : 1;
         const batch = `OP/${checkpointCode}/${nextBatchNum}`;
-  
+
+        // Mark all VERIFIED cards at this checkpoint as OPNAME so they're scoped to this session
+        await tx.card.updateMany({
+          where: { checkpointCode, status: 'VERIFIED' },
+          data: { status: 'OPNAME' }
+        });
+
         const opname = await tx.opname.create({
           data: {
             amount,
@@ -245,27 +224,54 @@ class OpnameController {
       const result = await prisma.$transaction(async (tx) => {
         const opnameId = Number(id);
 
-        // Find cards already scanned in this opname
+        // Fetch all scanned updates (itemID + status) in one query
         const scannedUpdates = await tx.opnameUpdate.findMany({
           where: { opnameID: opnameId },
-          select: { itemID: true }
+          select: { itemID: true, status: true }
         });
         const scannedIds = new Set(scannedUpdates.map(u => u.itemID));
 
-        // Find VERIFIED cards at this checkpoint that were not scanned
+        // Unscanned = OPNAME cards not in scannedIds (still awaiting scan when opname closed)
         const unscannedCards = await tx.card.findMany({
           where: {
             checkpointCode: existing.checkpointCode,
-            status: 'VERIFIED',
+            status: 'OPNAME',
             ...(scannedIds.size > 0 && { id: { notIn: [...scannedIds] } })
           },
           select: { id: true }
         });
 
+        // Group scanned cards by their opname condition
+        const byCondition = scannedUpdates.reduce(
+          (acc, u) => {
+            acc[u.status as 'OK' | 'BROKEN' | 'LOST'].push(u.itemID);
+            return acc;
+          },
+          { OK: [] as number[], BROKEN: [] as number[], LOST: [] as number[] }
+        );
+
+        await Promise.all([
+          // Scanned OK → restore to VERIFIED
+          byCondition.OK.length > 0 && tx.card.updateMany({
+            where: { id: { in: byCondition.OK } },
+            data: { status: 'VERIFIED' }
+          }),
+          // Scanned BROKEN → mark BROKEN
+          byCondition.BROKEN.length > 0 && tx.card.updateMany({
+            where: { id: { in: byCondition.BROKEN } },
+            data: { status: 'BROKEN' }
+          }),
+          // Scanned LOST → mark LOST
+          byCondition.LOST.length > 0 && tx.card.updateMany({
+            where: { id: { in: byCondition.LOST } },
+            data: { status: 'LOST' }
+          }),
+        ].filter(Boolean));
+
         if (unscannedCards.length > 0) {
           const unscannedIds = unscannedCards.map(c => c.id);
 
-          // Mark all unscanned cards as LOST in the opname and update their actual status
+          // Auto-LOST: create opname updates and mark cards LOST
           await Promise.all([
             tx.opnameUpdate.createMany({
               data: unscannedIds.map(itemID => ({
@@ -286,7 +292,6 @@ class OpnameController {
             where: { checkpointCode: existing.checkpointCode },
             orderBy: { createdAt: 'desc' }
           });
-
           if (cardStock) {
             await tx.cardStock.create({
               data: {
@@ -371,8 +376,9 @@ class OpnameController {
         prisma.opname.count({ where })
       ]);
 
-      // Per-status counts for all fetched opnames in one grouped query
       const opnameIds = opnames.map(o => o.id);
+
+      // Per-status update counts per opname
       const updateCounts = opnameIds.length > 0
         ? await prisma.opnameUpdate.groupBy({
             by: ['opnameID', 'status'],
@@ -390,6 +396,7 @@ class OpnameController {
 
       const enriched = opnames.map(opname => {
         const counts = countMap[opname.id] ?? { OK: 0, BROKEN: 0, LOST: 0 };
+        // opname.amount = COUNT(VERIFIED) at creation time — always the correct initial stock
         return {
           ...opname,
           stats: {
@@ -440,20 +447,35 @@ class OpnameController {
 
       // Build a lookup of scanned cards: itemID -> update
       const updateByItemId = new Map(updates.map(u => [u.itemID, u]));
+      const scannedIds = new Set(updates.map(u => u.itemID));
 
       type ItemDetail = { id: number; key: string; createdAt: Date; validatedAt?: Date | null; status: string };
 
-      // Fetch ALL cards/numbers at the checkpoint — not just scanned ones
+      // Fetch cards that are part of this opname's scope:
+      // - still OPNAME status (unscanned, awaiting scan) OR
+      // - already scanned in this opname (have an OpnameUpdate entry)
       let allItems: ItemDetail[] = [];
       if (opname.type === 'ICCID') {
         allItems = await prisma.card.findMany({
-          where: { checkpointCode: opname.checkpointCode },
+          where: {
+            checkpointCode: opname.checkpointCode,
+            OR: [
+              { status: 'OPNAME' },
+              { id: { in: scannedIds.size > 0 ? [...scannedIds] : [-1] } }
+            ]
+          },
           select: { id: true, key: true, createdAt: true, validatedAt: true, status: true },
           orderBy: { createdAt: 'asc' }
         });
       } else {
         const numbers = await prisma.number.findMany({
-          where: { checkpointCode: opname.checkpointCode },
+          where: {
+            checkpointCode: opname.checkpointCode,
+            OR: [
+              { status: 'OPNAME' },
+              { id: { in: scannedIds.size > 0 ? [...scannedIds] : [-1] } }
+            ]
+          },
           select: { id: true, key: true, createdAt: true, status: true },
           orderBy: { createdAt: 'asc' }
         });
@@ -483,11 +505,12 @@ class OpnameController {
           opname: {
             ...opnameBase,
             stats: {
-              totalICCID: opname.amount,
+              initialCount: opname.amount,
               totalScanned,
               totalGood,
               totalBroken,
-              totalLost
+              totalLost,
+              finalCount: opname.amount - totalBroken - totalLost
             },
             items,
             closingReport: submittance
@@ -519,14 +542,52 @@ class OpnameController {
         throw err;
       }
 
-      const opname = await prisma.opname.update({
-        where: { id: Number(id) },
-        data: {
-          status
-        },
-        include: {
-          updates: true
+      const opname = await prisma.$transaction(async (tx) => {
+        if (status === "CANCELLED") {
+          // Collect all scanned item IDs from opname updates
+          const scannedUpdates = await tx.opnameUpdate.findMany({
+            where: { opnameID: Number(id) },
+            select: { itemID: true, status: true }
+          });
+          const scannedIds = scannedUpdates.map(u => u.itemID);
+          const damagedCount = scannedUpdates.filter(
+            u => u.status === 'BROKEN' || u.status === 'LOST'
+          ).length;
+
+          // Revert all scanned cards + remaining OPNAME cards back to VERIFIED
+          await tx.card.updateMany({
+            where: {
+              checkpointCode: existing.checkpointCode,
+              OR: [
+                { status: 'OPNAME' },
+                ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
+              ]
+            },
+            data: { status: 'VERIFIED' }
+          });
+
+          // Restore stock for BROKEN/LOST scans (each decremented stock during scanning)
+          if (damagedCount > 0) {
+            const cardStock = await tx.cardStock.findFirst({
+              where: { checkpointCode: existing.checkpointCode },
+              orderBy: { createdAt: 'desc' }
+            });
+            if (cardStock) {
+              await tx.cardStock.create({
+                data: {
+                  checkpointCode: existing.checkpointCode,
+                  amount: cardStock.amount + damagedCount
+                }
+              });
+            }
+          }
         }
+
+        return tx.opname.update({
+          where: { id: Number(id) },
+          data: { status },
+          include: { updates: true }
+        });
       });
 
       res.status(200).json({

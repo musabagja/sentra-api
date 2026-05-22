@@ -24,6 +24,8 @@ exports.ItemStatus = {
     SOLD: 'SOLD',
     BROKEN: 'BROKEN',
     LOST: 'LOST',
+    DELIVERY: 'DELIVERY',
+    OPNAME: 'OPNAME',
     HOLD: 'HOLD',
     UNVERIFIED: 'UNVERIFIED'
 };

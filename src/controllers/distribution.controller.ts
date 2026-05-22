@@ -55,7 +55,7 @@ class DistributionController {
             status: "VERIFIED"
           },
           data: {
-            status: "HOLD"
+            status: "DELIVERY"
           },
         });
 
@@ -233,7 +233,7 @@ class DistributionController {
           throw new Error('Status is required');
         }
 
-        const allowedStatuses = ["SCHEDULED", "HOLD"];
+        const allowedStatuses = ["SCHEDULED", "DELIVERY"];
         if (!allowedStatuses.includes(status)) {
           throw new Error('Invalid distribution status. Use the submit endpoint to mark as delivered, or the cancel endpoint to cancel');
         }
@@ -275,7 +275,7 @@ class DistributionController {
               }
             },
             data: {
-              status: "HOLD"
+              status: "DELIVERY"
             }
           });
         }
@@ -409,7 +409,7 @@ class DistributionController {
         // Validate before writing — if cards are gone the transaction rolls back cleanly
         const [holdCount, sourceStock, targetStock] = await Promise.all([
           tx.card.count({
-            where: { key: { in: itemKeys }, checkpointCode: distribution.sourceCode, status: 'HOLD' }
+            where: { key: { in: itemKeys }, checkpointCode: distribution.sourceCode, status: 'DELIVERY' }
           }),
           tx.cardStock.findFirst({
             where: { checkpointCode: distribution.sourceCode },
@@ -531,7 +531,7 @@ class DistributionController {
         // Restore HOLD cards back to VERIFIED
         if (itemKeys.length > 0) {
           await tx.card.updateMany({
-            where: { key: { in: itemKeys }, status: 'HOLD' },
+            where: { key: { in: itemKeys }, status: 'DELIVERY' },
             data: { status: 'VERIFIED' }
           });
           await tx.distributionItem.deleteMany({ where: { distributionID: existing.id } });

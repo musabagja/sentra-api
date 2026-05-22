@@ -6,18 +6,36 @@ REST API for managing SIM card stock, opname (stock-taking), and distribution ac
 
 ## What's New — 2026-05-22
 
-### `GET /api/opname` — new fields & filters
-- Response now includes `checkpoint.name` and a `stats` block per opname (`initialCount`, `totalGood`, `totalBroken`, `totalLost`, `finalCount`)
-- New query params: `startDate` and `endDate` (ISO 8601) to filter by `createdAt` range
+### Card status lifecycle — new `DELIVERY` and `OPNAME` statuses
+- `HOLD` is replaced by `DELIVERY` for cards reserved in a distribution
+- New `OPNAME` status: all `VERIFIED` cards at a checkpoint are set to `OPNAME` when an opname session starts, making the scope explicit and preventing new cards from being counted as initial stock mid-session
+- `ItemStatus` enum: `VERIFIED | SOLD | BROKEN | LOST | DELIVERY | OPNAME | UNVERIFIED`
 
-### `GET /api/opname/:id` — enriched response
-- `stats` — `totalICCID`, `totalScanned`, `totalGood`, `totalBroken`, `totalLost`
-- `items` — full ICCID list with `iccid`, `createdAt`, `validatedAt`, `initialCondition` (system status before opname), `verifiedCondition` (scan result), `scannedAt`
-- `closingReport` — submittance data: `signURL`, `picSignURL`, `picName`, `documentationURL`, `note`, `documentations[]`
+### `POST /api/opname` — scopes cards on creation
+- All `VERIFIED` cards at the checkpoint are atomically set to `OPNAME` status when the session is created
+- `amount` (initial stock) is now derived from an actual `COUNT(VERIFIED)` at creation time, not from the potentially stale `cardStock` counter
 
-### `PATCH /api/opname/:id/close` — new body fields & auto-LOST logic
-- New body fields: `picName` (name of PIC who signed), `note` (description / closing notes)
-- **Any `VERIFIED` card at the checkpoint that was not scanned is now automatically marked `LOST`** — the `OpnameUpdate` record is created, the card's actual status is set to `LOST`, and stock is decremented in the same transaction
+### `PATCH /api/opname/:id` (scan) — only accepts `OPNAME` cards
+- Rejects any card that does not have `OPNAME` status — prevents scanning cards that weren't part of the initial stock
+- Stock is decremented on scan only for `BROKEN`/`LOST` results (no increment for `OK` — those cards were already counted)
+
+### `PATCH /api/opname/:id/close` — full status resolution
+- Scanned `OK` → restored to `VERIFIED`; scanned `BROKEN` → `BROKEN`; scanned `LOST` → `LOST`
+- Unscanned `OPNAME` cards are auto-marked `LOST` (OpnameUpdate created, card status set, stock decremented)
+- New body fields: `picName`, `note`
+
+### `PUT /api/opname/:id` (cancel) — full rollback
+- When status is set to `CANCELLED`, all `OPNAME` cards and all scanned `BROKEN`/`LOST` cards at the checkpoint are restored to `VERIFIED`
+- Stock is incremented back for every `BROKEN`/`LOST` scan that had already decremented it
+
+### `GET /api/opname` — corrected `initialCount`
+- `stats.initialCount` now uses `opname.amount` (the COUNT taken at session start) — accurate for both `ONGOING` and `COMPLETED` opnames regardless of current card statuses
+- New query params: `startDate` / `endDate`
+
+### `GET /api/opname/:id` — corrected `initialCount` and `items` scope
+- `stats.initialCount` = `opname.amount`; added `finalCount = initialCount - totalBroken - totalLost`
+- `items` scoped to cards with `OPNAME` status (unscanned) OR an `OpnameUpdate` entry (scanned) — excludes cards validated after the session started
+- `items[].verifiedCondition` is `null` for unscanned cards
 
 ### `GET /api/stock/dashboard` — top sales stats
 - `topHighestSaleByCheckpoint` — top 10 STORE checkpoints by total SIM card sales
