@@ -386,33 +386,36 @@ class OpnameController {
                 throw err;
             }
             const { updates, submittance, ...opnameBase } = opname;
-            // Resolve item details (Card or Number) from update itemIDs
-            const itemIDs = updates.map(u => u.itemID);
-            const itemMap = {};
-            if (itemIDs.length > 0) {
-                if (opname.type === 'ICCID') {
-                    const cards = await prisma_1.default.card.findMany({
-                        where: { id: { in: itemIDs } },
-                        select: { id: true, key: true, createdAt: true, validatedAt: true, status: true }
-                    });
-                    cards.forEach(c => { itemMap[c.id] = c; });
-                }
-                else {
-                    const numbers = await prisma_1.default.number.findMany({
-                        where: { id: { in: itemIDs } },
-                        select: { id: true, key: true, createdAt: true, status: true }
-                    });
-                    numbers.forEach(n => { itemMap[n.id] = { ...n, validatedAt: null }; });
-                }
+            // Build a lookup of scanned cards: itemID -> update
+            const updateByItemId = new Map(updates.map(u => [u.itemID, u]));
+            // Fetch ALL cards/numbers at the checkpoint — not just scanned ones
+            let allItems = [];
+            if (opname.type === 'ICCID') {
+                allItems = await prisma_1.default.card.findMany({
+                    where: { checkpointCode: opname.checkpointCode },
+                    select: { id: true, key: true, createdAt: true, validatedAt: true, status: true },
+                    orderBy: { createdAt: 'asc' }
+                });
             }
-            const items = updates.map(update => ({
-                iccid: itemMap[update.itemID]?.key ?? null,
-                createdAt: itemMap[update.itemID]?.createdAt ?? null,
-                validatedAt: itemMap[update.itemID]?.validatedAt ?? null,
-                initialCondition: itemMap[update.itemID]?.status ?? null,
-                verifiedCondition: update.status,
-                scannedAt: update.createdAt
-            }));
+            else {
+                const numbers = await prisma_1.default.number.findMany({
+                    where: { checkpointCode: opname.checkpointCode },
+                    select: { id: true, key: true, createdAt: true, status: true },
+                    orderBy: { createdAt: 'asc' }
+                });
+                allItems = numbers.map(n => ({ ...n, validatedAt: null }));
+            }
+            const items = allItems.map(item => {
+                const update = updateByItemId.get(item.id);
+                return {
+                    iccid: item.key,
+                    createdAt: item.createdAt,
+                    validatedAt: item.validatedAt ?? null,
+                    initialCondition: item.status,
+                    verifiedCondition: update?.status ?? null,
+                    scannedAt: update?.createdAt ?? null
+                };
+            });
             const totalScanned = updates.length;
             const totalGood = updates.filter(u => u.status === 'OK').length;
             const totalBroken = updates.filter(u => u.status === 'BROKEN').length;

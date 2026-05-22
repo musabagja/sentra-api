@@ -438,35 +438,39 @@ class OpnameController {
 
       const { updates, submittance, ...opnameBase } = opname;
 
-      // Resolve item details (Card or Number) from update itemIDs
-      const itemIDs = updates.map(u => u.itemID);
-      type ItemDetail = { key: string; createdAt: Date; validatedAt?: Date | null; status: string };
-      const itemMap: Record<number, ItemDetail> = {};
+      // Build a lookup of scanned cards: itemID -> update
+      const updateByItemId = new Map(updates.map(u => [u.itemID, u]));
 
-      if (itemIDs.length > 0) {
-        if (opname.type === 'ICCID') {
-          const cards = await prisma.card.findMany({
-            where: { id: { in: itemIDs } },
-            select: { id: true, key: true, createdAt: true, validatedAt: true, status: true }
-          });
-          cards.forEach(c => { itemMap[c.id] = c; });
-        } else {
-          const numbers = await prisma.number.findMany({
-            where: { id: { in: itemIDs } },
-            select: { id: true, key: true, createdAt: true, status: true }
-          });
-          numbers.forEach(n => { itemMap[n.id] = { ...n, validatedAt: null }; });
-        }
+      type ItemDetail = { id: number; key: string; createdAt: Date; validatedAt?: Date | null; status: string };
+
+      // Fetch ALL cards/numbers at the checkpoint — not just scanned ones
+      let allItems: ItemDetail[] = [];
+      if (opname.type === 'ICCID') {
+        allItems = await prisma.card.findMany({
+          where: { checkpointCode: opname.checkpointCode },
+          select: { id: true, key: true, createdAt: true, validatedAt: true, status: true },
+          orderBy: { createdAt: 'asc' }
+        });
+      } else {
+        const numbers = await prisma.number.findMany({
+          where: { checkpointCode: opname.checkpointCode },
+          select: { id: true, key: true, createdAt: true, status: true },
+          orderBy: { createdAt: 'asc' }
+        });
+        allItems = numbers.map(n => ({ ...n, validatedAt: null }));
       }
 
-      const items = updates.map(update => ({
-        iccid: itemMap[update.itemID]?.key ?? null,
-        createdAt: itemMap[update.itemID]?.createdAt ?? null,
-        validatedAt: itemMap[update.itemID]?.validatedAt ?? null,
-        initialCondition: itemMap[update.itemID]?.status ?? null,
-        verifiedCondition: update.status,
-        scannedAt: update.createdAt
-      }));
+      const items = allItems.map(item => {
+        const update = updateByItemId.get(item.id);
+        return {
+          iccid: item.key,
+          createdAt: item.createdAt,
+          validatedAt: item.validatedAt ?? null,
+          initialCondition: item.status,
+          verifiedCondition: update?.status ?? null,
+          scannedAt: update?.createdAt ?? null
+        };
+      });
 
       const totalScanned = updates.length;
       const totalGood    = updates.filter(u => u.status === 'OK').length;
