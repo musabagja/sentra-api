@@ -84,6 +84,9 @@ class OpnameController {
         // All OPNAME cards were VERIFIED before the opname started.
         // Decrement stock only when physically damaged or missing.
         if (status === "BROKEN" || status === "LOST") {
+          if (cardStock.amount <= 0) {
+            throw new Error('Stock is already at zero; cannot record further losses');
+          }
           await tx.cardStock.create({
             data: {
               amount: cardStock.amount - 1,
@@ -287,7 +290,7 @@ class OpnameController {
             })
           ]);
 
-          // Adjust stock: deduct all auto-LOST cards in one write
+          // Adjust stock: deduct all auto-LOST cards, floor at 0
           const cardStock = await tx.cardStock.findFirst({
             where: { checkpointCode: existing.checkpointCode },
             orderBy: { createdAt: 'desc' }
@@ -295,7 +298,7 @@ class OpnameController {
           if (cardStock) {
             await tx.cardStock.create({
               data: {
-                amount: cardStock.amount - unscannedCards.length,
+                amount: Math.max(0, cardStock.amount - unscannedCards.length),
                 checkpointCode: existing.checkpointCode
               }
             });
@@ -488,7 +491,7 @@ class OpnameController {
           iccid: item.key,
           createdAt: item.createdAt,
           validatedAt: item.validatedAt ?? null,
-          initialCondition: item.status,
+          initialCondition: 'VERIFIED',
           verifiedCondition: update?.status ?? null,
           scannedAt: update?.createdAt ?? null
         };
@@ -528,9 +531,8 @@ class OpnameController {
       const { status } = req.body;
       const allowed = req.checkpointCodes ?? [];
 
-      const validStatuses = ["ONGOING", "COMPLETED", "CANCELLED"];
-      if (!status || !validStatuses.includes(status)) {
-        const err = new Error(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+      if (status !== "CANCELLED") {
+        const err = new Error('Only CANCELLED is a valid status update. Use the close endpoint to complete an opname.');
         (err as any).status = 400;
         throw err;
       }
@@ -539,6 +541,12 @@ class OpnameController {
       if (!existing || !hasCheckpointAccess(existing.checkpointCode, allowed)) {
         const err = new Error('Opname not found');
         (err as any).status = 404;
+        throw err;
+      }
+
+      if (existing.status !== "ONGOING") {
+        const err = new Error('Can only cancel an ongoing opname');
+        (err as any).status = 400;
         throw err;
       }
 
@@ -613,8 +621,44 @@ class OpnameController {
         throw err;
       }
 
-      await prisma.opname.delete({
-        where: { id: Number(id) }
+      await prisma.$transaction(async (tx) => {
+        if (existing.status === "ONGOING") {
+          // Collect scanned updates to know which cards had stock decremented
+          const scannedUpdates = await tx.opnameUpdate.findMany({
+            where: { opnameID: existing.id },
+            select: { itemID: true, status: true }
+          });
+          const scannedIds = scannedUpdates.map(u => u.itemID);
+          const damagedCount = scannedUpdates.filter(
+            u => u.status === 'BROKEN' || u.status === 'LOST'
+          ).length;
+
+          // Restore all OPNAME cards + any already-scanned BROKEN/LOST cards back to VERIFIED
+          await tx.card.updateMany({
+            where: {
+              checkpointCode: existing.checkpointCode,
+              OR: [
+                { status: 'OPNAME' },
+                ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
+              ]
+            },
+            data: { status: 'VERIFIED' }
+          });
+
+          if (damagedCount > 0) {
+            const cardStock = await tx.cardStock.findFirst({
+              where: { checkpointCode: existing.checkpointCode },
+              orderBy: { createdAt: 'desc' }
+            });
+            if (cardStock) {
+              await tx.cardStock.create({
+                data: { checkpointCode: existing.checkpointCode, amount: cardStock.amount + damagedCount }
+              });
+            }
+          }
+        }
+
+        await tx.opname.delete({ where: { id: existing.id } });
       });
 
       res.status(200).json({

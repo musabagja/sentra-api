@@ -49,14 +49,10 @@ class DistributionController {
 
         await tx.card.updateMany({
           where: {
-            key: {
-              in: cardKeys
-            },
+            key: { in: foundCards.map(c => c.key) },
             status: "VERIFIED"
           },
-          data: {
-            status: "DELIVERY"
-          },
+          data: { status: "DELIVERY" }
         });
 
         const lastDistribution = await tx.distribution.findFirst({
@@ -343,13 +339,10 @@ class DistributionController {
         
         await tx.card.updateMany({
           where: {
-            key: {
-              in: currentDistribution.items.map(item => item.itemKey)
-            }
+            key: { in: currentDistribution.items.map(item => item.itemKey) },
+            status: 'DELIVERY'
           },
-          data: {
-            status: "VERIFIED"
-          }
+          data: { status: "VERIFIED" }
         });
 
         return updatedDistribution;

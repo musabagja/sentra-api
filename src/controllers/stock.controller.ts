@@ -350,6 +350,7 @@ class StockController {
         }
 
         if (cardKeys.length > 0) {
+          await tx.distributionItem.deleteMany({ where: { itemKey: { in: cardKeys } } });
           await tx.merge.deleteMany({ where: { cardKey: { in: cardKeys } } });
         }
 
@@ -720,7 +721,7 @@ class StockController {
           updateData.validatedAt = new Date();
         }
 
-        await tx.card.update({
+        const updatedCard = await tx.card.update({
           where: { key: key as string },
           data: updateData
         });
@@ -792,7 +793,7 @@ class StockController {
           throw new Error('Invalid status');
         }
 
-        return card;
+        return updatedCard;
       })
 
       res.status(200).json({
@@ -864,9 +865,20 @@ class StockController {
             if (!stock || Number(stock.amount) <= 0) {
               throw new Error(`Card unavailable at checkpoint: ${checkpointCode}`);
             }
-            await tx.cardStock.create({
-              data: { checkpointCode: card.checkpointCode, amount: Number(stock.amount) - 1 }
-            });
+            await Promise.all([
+              tx.cardStock.create({
+                data: { checkpointCode: card.checkpointCode, amount: Number(stock.amount) - 1 }
+              }),
+              tx.cardMovement.create({
+                data: {
+                  cardID: card.id,
+                  type: 'SALE',
+                  userCode: req.user!.code,
+                  sourceCode: card.checkpointCode,
+                  targetCode: null
+                }
+              })
+            ]);
 
             merged.push(await tx.merge.create({
               data: { cardKey, numberKey, checkpointCode, userCode: req.user!.code, TRN: trn, soldAt: new Date() }
@@ -931,22 +943,26 @@ class StockController {
           }
           await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
           const stock = await tx.cardStock.findFirst({
-            where: {
-              checkpointCode: card.checkpointCode
-            },
-            orderBy: {
-              createdAt: 'desc'
-            }
+            where: { checkpointCode: card.checkpointCode },
+            orderBy: { createdAt: 'desc' }
           });
           if (!stock || Number(stock.amount) <= 0) {
             throw new Error('Card unavailable');
           }
-          await tx.cardStock.create({
-            data: {
-              checkpointCode: card.checkpointCode,
-              amount: Number(stock.amount) - 1  
-            }
-          })
+          await Promise.all([
+            tx.cardStock.create({
+              data: { checkpointCode: card.checkpointCode, amount: Number(stock.amount) - 1 }
+            }),
+            tx.cardMovement.create({
+              data: {
+                cardID: card.id,
+                type: 'SALE',
+                userCode: req.user!.code,
+                sourceCode: card.checkpointCode,
+                targetCode: null
+              }
+            })
+          ]);
         }
   
         let esimCode = "";
