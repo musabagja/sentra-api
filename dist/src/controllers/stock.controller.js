@@ -216,13 +216,12 @@ class StockController {
                     }
                 }
             });
-            const excluded = ["UNVERIFIED", "LOST"];
-            const [totalBatch, totalCards, totalVerified] = await Promise.all([
+            const [totalBatch, totalCards, totalVerified, totalUnverified] = await Promise.all([
                 prisma_1.default.uploadBatch.count({ where }),
                 prisma_1.default.card.count({ where: { checkpointCode: { in: allowed } } }),
-                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: { notIn: excluded } } })
+                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: 'VERIFIED' } }),
+                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: 'UNVERIFIED' } })
             ]);
-            const totalUnverified = totalCards - totalVerified;
             res.status(200).json({
                 message: 'Cards retrieved successfully',
                 data: {
@@ -1203,21 +1202,20 @@ class StockController {
                     where
                 });
             }
-            const [total, monthly, daily] = await Promise.all([
-                prisma_1.default.merge.count({ where: { checkpointCode: { in: allowed } } }),
-                prisma_1.default.merge.count({
-                    where: {
-                        checkpointCode: { in: allowed },
-                        createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
-                    }
-                }),
-                prisma_1.default.merge.count({
-                    where: {
-                        checkpointCode: { in: allowed },
-                        createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }
-                    }
-                })
-            ]);
+            const baseCountWhere = { checkpointCode: { in: allowed } };
+            const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+            const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+            const [total, monthly, daily] = isSimcardQuery
+                ? await Promise.all([
+                    prisma_1.default.merge.count({ where: baseCountWhere }),
+                    prisma_1.default.merge.count({ where: { ...baseCountWhere, createdAt: { gte: monthStart } } }),
+                    prisma_1.default.merge.count({ where: { ...baseCountWhere, createdAt: { gte: dayStart } } })
+                ])
+                : await Promise.all([
+                    prisma_1.default.mergeAdditional.count({ where: baseCountWhere }),
+                    prisma_1.default.mergeAdditional.count({ where: { ...baseCountWhere, createdAt: { gte: monthStart } } }),
+                    prisma_1.default.mergeAdditional.count({ where: { ...baseCountWhere, createdAt: { gte: dayStart } } })
+                ]);
             res.status(200).json({
                 message: 'Merges retrieved successfully',
                 data: {

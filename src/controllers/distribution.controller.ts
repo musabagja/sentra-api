@@ -13,6 +13,7 @@ class DistributionController {
 
       if (!req.user) throw new Error('User not found');
       if (!Array.isArray(cardKeys)) throw new Error('Cards must be an array');
+      if (cardKeys.length === 0) throw new Error('Cards array cannot be empty');
 
       const allowed = req.checkpointCodes ?? [];
 
@@ -261,26 +262,19 @@ class DistributionController {
 
         const itemKeys = distribution.items.map(item => item.itemKey);
 
-        if (status === "DELIVERED") {
-          throw new Error("Mark as delivered only through submittance");
-        } else {
-          await tx.card.updateMany({
-            where: {
-              key: {
-                in: itemKeys
-              }
-            },
-            data: {
-              status: "DELIVERY"
-            }
-          });
-        }
+        await tx.card.updateMany({
+          where: {
+            key: { in: itemKeys },
+            status: { in: ['VERIFIED', 'DELIVERY'] }
+          },
+          data: { status: "DELIVERY" }
+        });
 
         return tx.distribution.update({
           where: { id: Number(id) },
           data: {
             status,
-            scheduledAt: scheduledAt ? new Date(scheduledAt) : null
+            ...(scheduledAt !== undefined && { scheduledAt: new Date(scheduledAt) })
           },
           include: {
             items: {
@@ -460,7 +454,7 @@ class DistributionController {
           tx.cardStock.create({
             data: {
               checkpointCode: distribution.sourceCode,
-              amount: sourceStock.amount - itemKeys.length
+              amount: Math.max(0, sourceStock.amount - itemKeys.length)
             }
           }),
           tx.cardStock.create({

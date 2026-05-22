@@ -551,43 +551,41 @@ class OpnameController {
       }
 
       const opname = await prisma.$transaction(async (tx) => {
-        if (status === "CANCELLED") {
-          // Collect all scanned item IDs from opname updates
-          const scannedUpdates = await tx.opnameUpdate.findMany({
-            where: { opnameID: Number(id) },
-            select: { itemID: true, status: true }
-          });
-          const scannedIds = scannedUpdates.map(u => u.itemID);
-          const damagedCount = scannedUpdates.filter(
-            u => u.status === 'BROKEN' || u.status === 'LOST'
-          ).length;
+        // Collect all scanned item IDs from opname updates
+        const scannedUpdates = await tx.opnameUpdate.findMany({
+          where: { opnameID: Number(id) },
+          select: { itemID: true, status: true }
+        });
+        const scannedIds = scannedUpdates.map(u => u.itemID);
+        const damagedCount = scannedUpdates.filter(
+          u => u.status === 'BROKEN' || u.status === 'LOST'
+        ).length;
 
-          // Revert all scanned cards + remaining OPNAME cards back to VERIFIED
-          await tx.card.updateMany({
-            where: {
-              checkpointCode: existing.checkpointCode,
-              OR: [
-                { status: 'OPNAME' },
-                ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
-              ]
-            },
-            data: { status: 'VERIFIED' }
-          });
+        // Revert all scanned cards + remaining OPNAME cards back to VERIFIED
+        await tx.card.updateMany({
+          where: {
+            checkpointCode: existing.checkpointCode,
+            OR: [
+              { status: 'OPNAME' },
+              ...(scannedIds.length > 0 ? [{ id: { in: scannedIds } }] : [])
+            ]
+          },
+          data: { status: 'VERIFIED' }
+        });
 
-          // Restore stock for BROKEN/LOST scans (each decremented stock during scanning)
-          if (damagedCount > 0) {
-            const cardStock = await tx.cardStock.findFirst({
-              where: { checkpointCode: existing.checkpointCode },
-              orderBy: { createdAt: 'desc' }
+        // Restore stock for BROKEN/LOST scans (each decremented stock during scanning)
+        if (damagedCount > 0) {
+          const cardStock = await tx.cardStock.findFirst({
+            where: { checkpointCode: existing.checkpointCode },
+            orderBy: { createdAt: 'desc' }
+          });
+          if (cardStock) {
+            await tx.cardStock.create({
+              data: {
+                checkpointCode: existing.checkpointCode,
+                amount: cardStock.amount + damagedCount
+              }
             });
-            if (cardStock) {
-              await tx.cardStock.create({
-                data: {
-                  checkpointCode: existing.checkpointCode,
-                  amount: cardStock.amount + damagedCount
-                }
-              });
-            }
           }
         }
 
@@ -658,6 +656,13 @@ class OpnameController {
           }
         }
 
+        // Delete children in FK dependency order before deleting the opname
+        const submittance = await tx.opnameSubmittance.findUnique({ where: { opnameID: existing.id } });
+        if (submittance) {
+          await tx.opnameSubmittanceDocumentation.deleteMany({ where: { submittanceID: submittance.id } });
+          await tx.opnameSubmittance.delete({ where: { id: submittance.id } });
+        }
+        await tx.opnameUpdate.deleteMany({ where: { opnameID: existing.id } });
         await tx.opname.delete({ where: { id: existing.id } });
       });
 

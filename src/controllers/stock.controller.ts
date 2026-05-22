@@ -212,13 +212,12 @@ class StockController {
         }
       });
 
-      const excluded: ItemStatus[] = ["UNVERIFIED", "LOST"];
-      const [totalBatch, totalCards, totalVerified] = await Promise.all([
+      const [totalBatch, totalCards, totalVerified, totalUnverified] = await Promise.all([
         prisma.uploadBatch.count({ where }),
         prisma.card.count({ where: { checkpointCode: { in: allowed } } }),
-        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: { notIn: excluded } } })
+        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: 'VERIFIED' } }),
+        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: 'UNVERIFIED' } })
       ]);
-      const totalUnverified = totalCards - totalVerified;
 
       res.status(200).json({
         message: 'Cards retrieved successfully',
@@ -1275,21 +1274,21 @@ class StockController {
           where
         });
       }
-      const [total, monthly, daily] = await Promise.all([
-        prisma.merge.count({ where: { checkpointCode: { in: allowed } } }),
-        prisma.merge.count({
-          where: {
-            checkpointCode: { in: allowed },
-            createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
-          }
-        }),
-        prisma.merge.count({
-          where: {
-            checkpointCode: { in: allowed },
-            createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }
-          }
-        })
-      ]);
+      const baseCountWhere = { checkpointCode: { in: allowed } };
+      const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+      const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+
+      const [total, monthly, daily] = isSimcardQuery
+        ? await Promise.all([
+            prisma.merge.count({ where: baseCountWhere }),
+            prisma.merge.count({ where: { ...baseCountWhere, createdAt: { gte: monthStart } } }),
+            prisma.merge.count({ where: { ...baseCountWhere, createdAt: { gte: dayStart } } })
+          ])
+        : await Promise.all([
+            prisma.mergeAdditional.count({ where: baseCountWhere }),
+            prisma.mergeAdditional.count({ where: { ...baseCountWhere, createdAt: { gte: monthStart } } }),
+            prisma.mergeAdditional.count({ where: { ...baseCountWhere, createdAt: { gte: dayStart } } })
+          ]);
 
       res.status(200).json({
         message: 'Merges retrieved successfully',
