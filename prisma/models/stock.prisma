@@ -336,7 +336,9 @@ model OpnameSubmittance {
   userCode   String
   signURL    String?
   picSignURL String?
+  picName    String?
   documentationURL String?
+  note       String?
   createdAt  DateTime           @default(now())
 
   opname Opname @relation(fields: [opnameID], references: [id])

@@ -2,6 +2,29 @@
 
 REST API for managing SIM card stock, opname (stock-taking), and distribution across checkpoints.
 
+---
+
+## What's New — 2026-05-22
+
+### `GET /api/opname` — new fields & filters
+- Response now includes `checkpoint.name` and a `stats` block per opname (`initialCount`, `totalGood`, `totalBroken`, `totalLost`, `finalCount`)
+- New query params: `startDate` and `endDate` (ISO 8601) to filter by `createdAt` range
+
+### `GET /api/opname/:id` — enriched response
+- `stats` — `totalICCID`, `totalScanned`, `totalGood`, `totalBroken`, `totalLost`
+- `items` — full ICCID list with `iccid`, `createdAt`, `validatedAt`, `initialCondition` (system status before opname), `verifiedCondition` (scan result), `scannedAt`
+- `closingReport` — submittance data: `signURL`, `picSignURL`, `picName`, `documentationURL`, `note`, `documentations[]`
+
+### `PATCH /api/opname/:id/close` — new body fields & auto-LOST logic
+- New body fields: `picName` (name of PIC who signed), `note` (description / closing notes)
+- **Any `VERIFIED` card at the checkpoint that was not scanned is now automatically marked `LOST`** — the `OpnameUpdate` record is created, the card's actual status is set to `LOST`, and stock is decremented in the same transaction
+
+### `GET /api/stock/dashboard` — top sales stats
+- `topHighestSaleByCheckpoint` — top 10 STORE checkpoints by total SIM card sales
+- `topHighestSaleByUser` — top 10 users by total SIM card sales across scoped checkpoints
+
+---
+
 ## Stack
 
 - **Runtime**: Node.js + TypeScript
@@ -371,14 +394,94 @@ Creates a new opname session for a checkpoint. Only one `ONGOING` opname is allo
 | `limit` | number | Default `10` |
 | `checkpointCode` | string | Filter by checkpoint |
 | `type` | `ICCID \| MSISDN` | Filter by type |
+| `startDate` | ISO 8601 string | Filter `createdAt` from this date |
+| `endDate` | ISO 8601 string | Filter `createdAt` up to this date |
 
-**Response** `200` — `{ data: { opnames }, pagination }` with latest 10 updates and `_count` per opname.
+**Response** `200`
+```json
+{
+  "data": {
+    "opnames": [
+      {
+        "id": 1,
+        "batch": "OP/STORE001/1",
+        "status": "COMPLETED",
+        "checkpoint": { "name": "Store A" },
+        "submittance": { "..." },
+        "stats": {
+          "initialCount": 100,
+          "totalGood": 90,
+          "totalBroken": 5,
+          "totalLost": 5,
+          "finalCount": 90
+        }
+      }
+    ]
+  },
+  "pagination": { "..." }
+}
+```
+
+| Field | Description |
+|---|---|
+| `checkpoint.name` | Name of the checkpoint this opname belongs to |
+| `stats.initialCount` | Total cards expected at opname start |
+| `stats.totalGood` | Cards scanned as `OK` |
+| `stats.totalBroken` | Cards scanned as `BROKEN` |
+| `stats.totalLost` | Cards scanned as `LOST` (includes auto-marked on close) |
+| `stats.finalCount` | `initialCount - totalBroken - totalLost` |
 
 ---
 
 ### `GET /api/opname/:id`
 
-**Response** `200` — `{ data: { opname } }` with all `updates` and `submittance` (including `documentations`).
+**Response** `200`
+```json
+{
+  "data": {
+    "opname": {
+      "id": 1,
+      "status": "COMPLETED",
+      "stats": {
+        "totalICCID": 100,
+        "totalScanned": 100,
+        "totalGood": 90,
+        "totalBroken": 5,
+        "totalLost": 5
+      },
+      "items": [
+        {
+          "iccid": "8962...",
+          "createdAt": "2026-01-01T00:00:00Z",
+          "validatedAt": "2026-01-02T00:00:00Z",
+          "initialCondition": "VERIFIED",
+          "verifiedCondition": "OK",
+          "scannedAt": "2026-01-03T00:00:00Z"
+        }
+      ],
+      "closingReport": {
+        "signURL": "/uploads/sign.jpg",
+        "picSignURL": "/uploads/pic.jpg",
+        "picName": "John Doe",
+        "documentationURL": "/uploads/doc1.jpg",
+        "note": "All cards accounted for.",
+        "documentations": [{ "id": 1, "url": "/uploads/doc1.jpg" }]
+      }
+    }
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `stats.totalICCID` | Total cards expected (= `amount`) |
+| `stats.totalScanned` | Total cards with an opname update entry |
+| `stats.totalGood / totalBroken / totalLost` | Breakdown by condition |
+| `items[].iccid` | The card's ICCID / MSISDN key |
+| `items[].initialCondition` | Card's system status before opname |
+| `items[].verifiedCondition` | Condition recorded during opname (`OK \| BROKEN \| LOST`) |
+| `items[].scannedAt` | When the update was recorded |
+| `closingReport` | Submittance data recorded when the opname was closed |
 
 ---
 
@@ -402,7 +505,9 @@ Stock adjustment rules:
 
 ### `PATCH /api/opname/:id/close`
 
-Closes the opname and records submittance proof. Accepts file uploads via `multipart/form-data`.
+Closes the opname. Any `VERIFIED` cards at the checkpoint that were **not scanned** are automatically marked `LOST` (both in the opname record and their actual card status), and stock is decremented accordingly.
+
+Accepts file uploads via `multipart/form-data`.
 
 **Form fields**
 
@@ -411,16 +516,21 @@ Closes the opname and records submittance proof. Accepts file uploads via `multi
 | `signFile` | image | Operator signature (max 5 MB) |
 | `picSignFile` | image | PIC signature (max 5 MB) |
 | `documentationFile` | image | Documentation photos, up to 2 files |
+| `picName` | string | Name of the PIC who signed |
+| `note` | string | Description / closing notes |
 
 **Response** `200`
 ```json
 {
   "data": {
-    "opname": { "id": 1, "status": "COMPLETED", "..." },
+    "opname": { "id": 1, "status": "COMPLETED", "progress": 100 },
     "submittance": {
       "id": 1,
       "signURL": "/uploads/sign.jpg",
       "picSignURL": "/uploads/pic.jpg",
+      "picName": "John Doe",
+      "documentationURL": "/uploads/doc1.jpg",
+      "note": "Closing notes here.",
       "documentations": [{ "id": 1, "url": "/uploads/doc1.jpg" }]
     }
   }

@@ -222,12 +222,12 @@ class OpnameController {
     try {
       const { id } = req.params;
       const allowed = req.checkpointCodes ?? [];
-      const { signURL, picSignURL, documentationURL } = req.body;
+      const { signURL, picSignURL, picName, documentationURL, note } = req.body;
 
       // documentationURL may be a single string or an array (2 files max)
-      const documentationURLs: string[] = Array.isArray(documentationURL)
+      const documentationURLs: string[] = (Array.isArray(documentationURL)
         ? documentationURL
-        : documentationURL ? [documentationURL] : [];
+        : documentationURL ? [documentationURL] : []).slice(0, 2);
 
       const existing = await prisma.opname.findUnique({ where: { id: Number(id) } });
       if (!existing || !hasCheckpointAccess(existing.checkpointCode, allowed)) {
@@ -243,17 +243,76 @@ class OpnameController {
       }
 
       const result = await prisma.$transaction(async (tx) => {
+        const opnameId = Number(id);
+
+        // Find cards already scanned in this opname
+        const scannedUpdates = await tx.opnameUpdate.findMany({
+          where: { opnameID: opnameId },
+          select: { itemID: true }
+        });
+        const scannedIds = new Set(scannedUpdates.map(u => u.itemID));
+
+        // Find VERIFIED cards at this checkpoint that were not scanned
+        const unscannedCards = await tx.card.findMany({
+          where: {
+            checkpointCode: existing.checkpointCode,
+            status: 'VERIFIED',
+            ...(scannedIds.size > 0 && { id: { notIn: [...scannedIds] } })
+          },
+          select: { id: true }
+        });
+
+        if (unscannedCards.length > 0) {
+          const unscannedIds = unscannedCards.map(c => c.id);
+
+          // Mark all unscanned cards as LOST in the opname and update their actual status
+          await Promise.all([
+            tx.opnameUpdate.createMany({
+              data: unscannedIds.map(itemID => ({
+                itemID,
+                status: 'LOST' as OpnameConditionStatus,
+                opnameID: opnameId,
+                userCode: req.user!.code
+              }))
+            }),
+            tx.card.updateMany({
+              where: { id: { in: unscannedIds } },
+              data: { status: 'LOST' }
+            })
+          ]);
+
+          // Adjust stock: deduct all auto-LOST cards in one write
+          const cardStock = await tx.cardStock.findFirst({
+            where: { checkpointCode: existing.checkpointCode },
+            orderBy: { createdAt: 'desc' }
+          });
+
+          if (cardStock) {
+            await tx.cardStock.create({
+              data: {
+                amount: cardStock.amount - unscannedCards.length,
+                checkpointCode: existing.checkpointCode
+              }
+            });
+          }
+        }
+
+        const totalProgress = scannedIds.size + unscannedCards.length;
+
         const opname = await tx.opname.update({
-          where: { id: Number(id) },
-          data: { status: "COMPLETED" }
+          where: { id: opnameId },
+          data: { status: "COMPLETED", progress: totalProgress }
         });
 
         const submittance = await tx.opnameSubmittance.create({
           data: {
-            opnameID: Number(id),
+            opnameID: opnameId,
             userCode: req.user!.code,
             signURL: signURL || null,
             picSignURL: picSignURL || null,
+            picName: picName || null,
+            documentationURL: documentationURLs[0] || null,
+            note: note || null,
             ...(documentationURLs.length > 0 && {
               documentations: {
                 createMany: {
@@ -284,13 +343,19 @@ class OpnameController {
 
   static async getOpnames(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, checkpointCode, type } = req.query;
+      const { page = 1, limit = 10, checkpointCode, type, startDate, endDate } = req.query;
       const allowed = req.checkpointCodes ?? [];
 
       const where: any = {
         checkpointCode: { in: resolveCheckpointFilter(checkpointCode as string | undefined, allowed) }
       };
       if (type) where.type = type;
+      if (startDate || endDate) {
+        where.createdAt = {
+          ...(startDate && { gte: new Date(startDate as string) }),
+          ...(endDate   && { lte: new Date(endDate as string) })
+        };
+      }
 
       const [opnames, total] = await Promise.all([
         prisma.opname.findMany({
@@ -298,27 +363,47 @@ class OpnameController {
           skip: (Number(page) - 1) * Number(limit),
           take: Number(limit),
           include: {
-            updates: {
-              take: 10,
-              orderBy: { createdAt: 'desc' }
-            },
-            submittance: {
-              include: { documentations: true }
-            },
-            _count: {
-              select: {
-                updates: true
-              }
-            }
+            checkpoint: { select: { name: true } },
+            submittance: { include: { documentations: true } }
           },
           orderBy: { createdAt: 'desc' }
         }),
         prisma.opname.count({ where })
       ]);
 
+      // Per-status counts for all fetched opnames in one grouped query
+      const opnameIds = opnames.map(o => o.id);
+      const updateCounts = opnameIds.length > 0
+        ? await prisma.opnameUpdate.groupBy({
+            by: ['opnameID', 'status'],
+            where: { opnameID: { in: opnameIds } },
+            _count: { status: true }
+          })
+        : [];
+
+      const countMap = updateCounts.reduce((acc, row) => {
+        if (!acc[row.opnameID]) acc[row.opnameID] = { OK: 0, BROKEN: 0, LOST: 0 };
+        acc[row.opnameID][row.status as 'OK' | 'BROKEN' | 'LOST'] = row._count.status;
+        return acc;
+      }, {} as Record<number, { OK: number; BROKEN: number; LOST: number }>);
+
+      const enriched = opnames.map(opname => {
+        const counts = countMap[opname.id] ?? { OK: 0, BROKEN: 0, LOST: 0 };
+        return {
+          ...opname,
+          stats: {
+            initialCount: opname.amount,
+            totalGood: counts.OK,
+            totalBroken: counts.BROKEN,
+            totalLost: counts.LOST,
+            finalCount: opname.amount - counts.BROKEN - counts.LOST
+          }
+        };
+      });
+
       res.status(200).json({
         message: 'Opnames retrieved successfully',
-        data: { opnames },
+        data: { opnames: enriched },
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -339,12 +424,8 @@ class OpnameController {
       const opname = await prisma.opname.findUnique({
         where: { id: Number(id) },
         include: {
-          updates: {
-            orderBy: { createdAt: 'desc' }
-          },
-          submittance: {
-            include: { documentations: true }
-          }
+          updates: { orderBy: { createdAt: 'desc' } },
+          submittance: { include: { documentations: true } }
         }
       });
 
@@ -354,10 +435,58 @@ class OpnameController {
         throw err;
       }
 
+      const { updates, submittance, ...opnameBase } = opname;
+
+      // Resolve item details (Card or Number) from update itemIDs
+      const itemIDs = updates.map(u => u.itemID);
+      type ItemDetail = { key: string; createdAt: Date; validatedAt?: Date | null; status: string };
+      const itemMap: Record<number, ItemDetail> = {};
+
+      if (itemIDs.length > 0) {
+        if (opname.type === 'ICCID') {
+          const cards = await prisma.card.findMany({
+            where: { id: { in: itemIDs } },
+            select: { id: true, key: true, createdAt: true, validatedAt: true, status: true }
+          });
+          cards.forEach(c => { itemMap[c.id] = c; });
+        } else {
+          const numbers = await prisma.number.findMany({
+            where: { id: { in: itemIDs } },
+            select: { id: true, key: true, createdAt: true, status: true }
+          });
+          numbers.forEach(n => { itemMap[n.id] = { ...n, validatedAt: null }; });
+        }
+      }
+
+      const items = updates.map(update => ({
+        iccid: itemMap[update.itemID]?.key ?? null,
+        createdAt: itemMap[update.itemID]?.createdAt ?? null,
+        validatedAt: itemMap[update.itemID]?.validatedAt ?? null,
+        initialCondition: itemMap[update.itemID]?.status ?? null,
+        verifiedCondition: update.status,
+        scannedAt: update.createdAt
+      }));
+
+      const totalScanned = updates.length;
+      const totalGood    = updates.filter(u => u.status === 'OK').length;
+      const totalBroken  = updates.filter(u => u.status === 'BROKEN').length;
+      const totalLost    = updates.filter(u => u.status === 'LOST').length;
+
       res.status(200).json({
         message: 'Opname retrieved successfully',
         data: {
-          opname
+          opname: {
+            ...opnameBase,
+            stats: {
+              totalICCID: opname.amount,
+              totalScanned,
+              totalGood,
+              totalBroken,
+              totalLost
+            },
+            items,
+            closingReport: submittance
+          }
         }
       });
     } catch (error) {
