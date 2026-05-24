@@ -1,8 +1,51 @@
 import "dotenv/config";
-import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../generated/prisma/client";
-const connectionString = `${process.env.DATABASE_URL}`;
-const adapter = new PrismaPg({ connectionString });
 
-const prisma = new PrismaClient({ adapter });
+const provider = (process.env.DATABASE_PROVIDER || "sqlserver").toLowerCase();
+const url = process.env.DATABASE_URL!;
+
+// Parse Prisma's SQL Server URL format:
+// sqlserver://HOST:PORT;database=DB;user=U;password=P;encrypt=true;...
+function parseMssqlUrl(rawUrl: string) {
+  const withoutScheme = rawUrl.replace(/^sqlserver:\/\//, "");
+  const [hostPort, ...parts] = withoutScheme.split(";");
+  const colonIdx = hostPort.lastIndexOf(":");
+  const server = colonIdx > 0 ? hostPort.slice(0, colonIdx) : hostPort;
+  const port = colonIdx > 0 ? parseInt(hostPort.slice(colonIdx + 1)) : 1433;
+
+  const params: Record<string, string> = {};
+  for (const part of parts) {
+    const eqIdx = part.indexOf("=");
+    if (eqIdx > 0) {
+      params[part.slice(0, eqIdx).toLowerCase()] = part.slice(eqIdx + 1);
+    }
+  }
+
+  return {
+    server,
+    port,
+    database: params["database"] ?? params["initial catalog"],
+    user: params["user"] ?? params["user id"],
+    password: params["password"],
+    options: {
+      encrypt: params["encrypt"] !== "false",
+      trustServerCertificate: params["trustservercertificate"] === "true",
+    },
+  };
+}
+
+function createClient(): PrismaClient {
+  if (provider === "sqlserver") {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { PrismaMssql } = require("@prisma/adapter-mssql") as typeof import("@prisma/adapter-mssql");
+    const adapter = new PrismaMssql(parseMssqlUrl(url));
+    return new PrismaClient({ adapter });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { PrismaPg } = require("@prisma/adapter-pg") as typeof import("@prisma/adapter-pg");
+  return new PrismaClient({ adapter: new PrismaPg({ connectionString: url }) });
+}
+
+const prisma = createClient();
 export default prisma;

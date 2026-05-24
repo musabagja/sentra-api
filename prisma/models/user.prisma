@@ -1,27 +1,17 @@
 
-enum CircleStatus {
-  ACTIVE
-  INACTIVE
-}
-
-enum UserStatus {
-  ACTIVE
-  INACTIVE
-}
-
 model User {
-  id         Int        @id @default(autoincrement())
+  id         Int      @id @default(autoincrement())
   name       String
-  code       String     @unique
-  phone      String     @unique
+  code       String   @unique
+  phone      String   @unique
   imageURL   String?
   password   String?
-  status     UserStatus @default(ACTIVE)
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
+  status     String   @default("ACTIVE")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
   circleCode String
 
-  circle                   Circle                    @relation(fields: [circleCode], references: [code])
+  circle                   Circle                    @relation(fields: [circleCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
   permissions              Permission[]
   sessions                 Session[]
   uploadBatches            UploadBatch[]
@@ -53,8 +43,8 @@ model Permission {
   status     Boolean  @default(true)
   createdAt  DateTime @default(now())
 
-  user   User   @relation(fields: [userCode], references: [code])
-  access Access @relation(fields: [accessCode], references: [code])
+  user   User   @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  access Access @relation(fields: [accessCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@unique([userCode, accessCode])
 }
@@ -65,17 +55,17 @@ model Session {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  user User @relation(fields: [userCode], references: [code])
+  user User @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([userCode])
 }
 
 model Circle {
-  id        Int          @id @default(autoincrement())
+  id        Int      @id @default(autoincrement())
   name      String
-  code      String       @unique
-  status    CircleStatus @default(ACTIVE)
-  createdAt DateTime     @default(now())
+  code      String   @unique
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
 
   users             User[]
   checkpointCircles CheckpointCircle[]
@@ -87,8 +77,8 @@ model CheckpointCircle {
   circleCode     String
   createdAt      DateTime @default(now())
 
-  checkpoint Checkpoint @relation(fields: [checkpointCode], references: [code])
-  circle     Circle     @relation(fields: [circleCode], references: [code])
+  checkpoint Checkpoint @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  circle     Circle     @relation(fields: [circleCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@unique([checkpointCode, circleCode])
 }

@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import prisma from "../../lib/prisma";
-import { OpnameConditionStatus } from "../../generated/prisma/enums";
+
 import { hasCheckpointAccess, resolveCheckpointFilter } from "../utils/access.util";
 
 class OpnameController {
@@ -9,7 +9,7 @@ class OpnameController {
       const { id } = req.params;
       const { status, cardKey } = req.body;
 
-      const validStatuses: OpnameConditionStatus[] = ["OK", "BROKEN", "LOST"];
+      const validStatuses = ["OK", "BROKEN", "LOST"];
       if (!status || !validStatuses.includes(status)) {
         const err = new Error(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
         (err as any).status = 400;
@@ -31,19 +31,27 @@ class OpnameController {
         }
 
         if (opname.status !== "ONGOING") {
-          throw new Error('Opname is not running');
+          const err = new Error('Opname is not running');
+          (err as any).status = 409;
+          throw err;
         }
 
         if (!card) {
-          throw new Error('Card not found');
+          const err = new Error('Card not found');
+          (err as any).status = 404;
+          throw err;
         }
 
         if (card.status !== "OPNAME") {
-          throw new Error('Card is not part of this opname');
+          const err = new Error('Card is not part of this opname');
+          (err as any).status = 409;
+          throw err;
         }
 
         if (card.checkpointCode !== opname.checkpointCode) {
-          throw new Error('Card is not at the same checkpoint as the opname');
+          const err = new Error('Card is not at the same checkpoint as the opname');
+          (err as any).status = 409;
+          throw err;
         }
 
         // Prevent duplicate scans of the same card within this opname
@@ -51,7 +59,9 @@ class OpnameController {
           where: { opnameID: Number(id), itemID: card.id }
         });
         if (existingUpdate) {
-          throw new Error('Card has already been scanned in this opname');
+          const err = new Error('Card has already been scanned in this opname');
+          (err as any).status = 409;
+          throw err;
         }
 
         const [scannedCount, cardStock] = await Promise.all([
@@ -79,7 +89,9 @@ class OpnameController {
         // Decrement stock only when physically damaged or missing.
         if (status === "BROKEN" || status === "LOST") {
           if (cardStock.amount <= 0) {
-            throw new Error('Stock is already at zero; cannot record further losses');
+            const err = new Error('Stock is already at zero; cannot record further losses');
+            (err as any).status = 409;
+            throw err;
           }
           await tx.cardStock.create({
             data: {
@@ -134,7 +146,9 @@ class OpnameController {
         });
 
         if (!checkpoint) {
-          throw new Error('Checkpoint not found');
+          const err = new Error('Checkpoint not found');
+          (err as any).status = 404;
+          throw err;
         }
 
         const runningOpname = await tx.opname.findFirst({
@@ -143,7 +157,9 @@ class OpnameController {
         });
 
         if (runningOpname) {
-          throw new Error('Opname is already running');
+          const err = new Error('An opname is already running for this checkpoint');
+          (err as any).status = 409;
+          throw err;
         }
 
         const [amount, lastOpname] = await Promise.all([
@@ -280,7 +296,7 @@ class OpnameController {
             tx.opnameUpdate.createMany({
               data: unscannedIds.map(itemID => ({
                 itemID,
-                status: 'LOST' as OpnameConditionStatus,
+                status: 'LOST',
                 opnameID: opnameId,
                 userCode: req.user!.code
               }))

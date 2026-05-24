@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
 import * as xlsx from 'xlsx';
-import { ItemStatus, UploadBatchStatus } from '../../generated/prisma/enums';
+
 import { hasCheckpointAccess, resolveCheckpointFilter } from '../utils/access.util';
 
 class StockController {
@@ -183,14 +183,16 @@ class StockController {
       const allowedStatus = ['ONGOING', 'COMPLETED'];
 
       if (status && !allowedStatus.includes(status as string)) {
-        throw new Error('Invalid status');
+        const err = new Error('Invalid status');
+        (err as any).status = 400;
+        throw err;
       }
 
       const where: any = {
         cards: { some: { checkpointCode: { in: allowed } } }
       };
       if (status) {
-        where.status = status as UploadBatchStatus;
+        where.status = status;
       }
       if (search) {
         where.OR = [
@@ -322,7 +324,7 @@ class StockController {
         throw err;
       }
 
-      const allowedStatuses: ItemStatus[] = ['VERIFIED', 'UNVERIFIED', 'BROKEN', 'LOST'];
+      const allowedStatuses = ['VERIFIED', 'UNVERIFIED', 'BROKEN', 'LOST'];
       const invalidCards = batch.cards.filter(card => !allowedStatuses.includes(card.status));
 
       if (invalidCards.length > 0) {
@@ -529,19 +531,25 @@ class StockController {
       }
 
       if (!file) {
-        throw new Error('No file uploaded');
+        const err = new Error('No file uploaded');
+        (err as any).status = 400;
+        throw err;
       }
 
       // Parse Excel outside the transaction — CPU-bound work should not hold a DB connection
       const workbook = xlsx.read(file.buffer, { type: 'buffer' });
 
       if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-        throw new Error('Excel file has no sheets');
+        const err = new Error('Excel file has no sheets');
+        (err as any).status = 422;
+        throw err;
       }
 
       const firstWorksheet = workbook.Sheets[workbook.SheetNames[0]!];
       if (!firstWorksheet) {
-        throw new Error('Worksheet not found');
+        const err = new Error('Worksheet not found');
+        (err as any).status = 422;
+        throw err;
       }
 
       const allowedSheets = ['ICCID', 'MSISDN'];
@@ -593,8 +601,16 @@ class StockController {
 
         if (batchID) {
           const existing = await tx.uploadBatch.findUnique({ where: { id: Number(batchID) } });
-          if (!existing) throw new Error(`Batch with id ${batchID} not found`);
-          if (existing.status === 'COMPLETED') throw new Error(`Batch with id ${batchID} is already completed`);
+          if (!existing) {
+            const err = new Error(`Batch ${batchID} not found`);
+            (err as any).status = 404;
+            throw err;
+          }
+          if (existing.status === 'COMPLETED') {
+            const err = new Error(`Batch ${batchID} is already completed`);
+            (err as any).status = 409;
+            throw err;
+          }
           batch = existing;
         } else {
           const lastBatch = await tx.uploadBatch.findFirst({ orderBy: { id: 'desc' } });
@@ -620,11 +636,20 @@ class StockController {
         }
 
         const result = await Promise.all(
-          jsonData.map(({ sheet, data }) =>
-            sheet === 'ICCID'
-              ? tx.card.createMany({ data: data as any[], skipDuplicates: true })
-              : tx.number.createMany({ data, skipDuplicates: true })
-          )
+          jsonData.map(async ({ sheet, data }) => {
+            const keys = (data as any[]).map((r: any) => r.key as string);
+            if (sheet === 'ICCID') {
+              const existing = await tx.card.findMany({ where: { key: { in: keys } }, select: { key: true } });
+              const existingSet = new Set(existing.map(c => c.key));
+              const newRows = (data as any[]).filter((r: any) => !existingSet.has(r.key));
+              return newRows.length > 0 ? tx.card.createMany({ data: newRows }) : { count: 0 };
+            } else {
+              const existing = await tx.number.findMany({ where: { key: { in: keys } }, select: { key: true } });
+              const existingSet = new Set(existing.map(n => n.key));
+              const newRows = data.filter((r: any) => !existingSet.has(r.key));
+              return newRows.length > 0 ? tx.number.createMany({ data: newRows }) : { count: 0 };
+            }
+          })
         );
 
         const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
@@ -672,10 +697,12 @@ class StockController {
 
         const validTargetStatuses = ['VERIFIED', 'BROKEN'];
         if (!rawStatus || !validTargetStatuses.includes(rawStatus)) {
-          throw new Error("Please provide status, either 'VERIFIED' or 'BROKEN'");
+          const err = new Error("Status must be 'VERIFIED' or 'BROKEN'");
+          (err as any).status = 400;
+          throw err;
         }
 
-        const nextStatus = rawStatus as ItemStatus;
+        const nextStatus = rawStatus as string;
         let updateData: any = {
           status: nextStatus
         };
@@ -686,7 +713,9 @@ class StockController {
         });
 
         if (!card) {
-          throw new Error('Card not found');
+          const err = new Error('Card not found');
+          (err as any).status = 404;
+          throw err;
         }
 
         const allowed = req.checkpointCodes ?? [];
@@ -697,23 +726,33 @@ class StockController {
         }
 
         if (!card.uploadBatch) {
-          throw new Error('Card upload batch not found');
+          const err = new Error('Card upload batch not found');
+          (err as any).status = 404;
+          throw err;
         }
 
         if (card.uploadBatch.status === "COMPLETED") {
-          throw new Error('Card upload batch is already completed');
+          const err = new Error('Card upload batch is already completed');
+          (err as any).status = 409;
+          throw err;
         }
 
         if (card.status === 'OPNAME') {
-          throw new Error('Card is currently in an opname session and cannot be modified');
+          const err = new Error('Card is currently in an opname session and cannot be modified');
+          (err as any).status = 409;
+          throw err;
         }
 
         if (card.status === 'DELIVERY') {
-          throw new Error('Card is currently in delivery and cannot be modified');
+          const err = new Error('Card is currently in delivery and cannot be modified');
+          (err as any).status = 409;
+          throw err;
         }
 
         if (card.status === 'SOLD') {
-          throw new Error('Card has already been sold');
+          const err = new Error('Card has already been sold');
+          (err as any).status = 409;
+          throw err;
         }
 
         if (card.status === "UNVERIFIED") {
@@ -790,7 +829,9 @@ class StockController {
             ])
           }
         } else {
-          throw new Error('Invalid status');
+          const err = new Error('Invalid card status transition');
+          (err as any).status = 400;
+          throw err;
         }
 
         return updatedCard;
@@ -810,11 +851,31 @@ class StockController {
       const { sims, checkpointCode, type, trn } = req.body;
 
       if (!req.user) throw new Error('User not found');
-      if (!Array.isArray(sims) || sims.length === 0) throw new Error('sims must be a non-empty array');
-      if (!type) throw new Error('Type is required');
-      if (type === 'SIMCARD' && sims.some((s: any) => !s.cardKey)) throw new Error('ICCID is required for SIMCARD type');
-      if (!checkpointCode) throw new Error('Checkpoint code is required');
-      if (!trn) throw new Error('TRN is required');
+      if (!Array.isArray(sims) || sims.length === 0) {
+        const err = new Error('sims must be a non-empty array');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (!type) {
+        const err = new Error('Type is required');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (type === 'SIMCARD' && sims.some((s: any) => !s.cardKey)) {
+        const err = new Error('ICCID is required for SIMCARD type');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (!checkpointCode) {
+        const err = new Error('Checkpoint code is required');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (!trn) {
+        const err = new Error('TRN is required');
+        (err as any).status = 400;
+        throw err;
+      }
 
       const allowed = req.checkpointCodes ?? [];
       if (!hasCheckpointAccess(checkpointCode, allowed)) {
@@ -825,16 +886,26 @@ class StockController {
 
       const results = await prisma.$transaction(async (tx) => {
         const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
-        if (!checkpoint) throw new Error(`Checkpoint not found: ${checkpointCode}`);
+        if (!checkpoint) {
+          const err = new Error(`Checkpoint not found: ${checkpointCode}`);
+          (err as any).status = 404;
+          throw err;
+        }
 
         const merged = [];
 
         for (const { cardKey, numberKey } of sims) {
           if (type === 'SIMCARD' || type === 'ESIM') {
             const number = await tx.number.findUnique({ where: { key: numberKey, status: 'VERIFIED' } });
-            if (!number) throw new Error(`Number not found or not verified: ${numberKey}`);
+            if (!number) {
+              const err = new Error(`Number not found or not verified: ${numberKey}`);
+              (err as any).status = 404;
+              throw err;
+            }
             if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
-              throw new Error(`Number checkpoint code does not match: ${numberKey}`);
+              const err = new Error(`Number ${numberKey} belongs to a different checkpoint`);
+              (err as any).status = 409;
+              throw err;
             }
             await tx.number.update({ where: { key: numberKey }, data: { status: 'SOLD' } });
           }
@@ -852,9 +923,15 @@ class StockController {
 
           if (type === 'SIMCARD') {
             const card = await tx.card.findUnique({ where: { key: cardKey, status: 'VERIFIED' } });
-            if (!card) throw new Error(`Card not found or not verified: ${cardKey}`);
+            if (!card) {
+              const err = new Error(`Card not found or not verified: ${cardKey}`);
+              (err as any).status = 404;
+              throw err;
+            }
             if (checkpoint.code !== card.checkpointCode) {
-              throw new Error(`Checkpoint code does not match card checkpoint code: ${cardKey}`);
+              const err = new Error(`Card ${cardKey} is not at checkpoint ${checkpointCode}`);
+              (err as any).status = 409;
+              throw err;
             }
             await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
 
@@ -863,7 +940,9 @@ class StockController {
               orderBy: { createdAt: 'desc' }
             });
             if (!stock || Number(stock.amount) <= 0) {
-              throw new Error(`Card unavailable at checkpoint: ${checkpointCode}`);
+              const err = new Error(`No stock available at checkpoint ${checkpointCode}`);
+              (err as any).status = 409;
+              throw err;
             }
             await Promise.all([
               tx.cardStock.create({
@@ -907,10 +986,26 @@ class StockController {
       const { cardKey, numberKey, checkpointCode, type, trn } = req.body;
 
       if (!req.user) throw new Error('User not found');
-      if (!type) throw new Error('Type is required');
-      if (type === 'SIMCARD' && !cardKey) throw new Error('ICCID is required for SIMCARD type');
-      if (!checkpointCode) throw new Error('Checkpoint code is required');
-      if (!trn) throw new Error('TRN is required');
+      if (!type) {
+        const err = new Error('Type is required');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (type === 'SIMCARD' && !cardKey) {
+        const err = new Error('ICCID is required for SIMCARD type');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (!checkpointCode) {
+        const err = new Error('Checkpoint code is required');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (!trn) {
+        const err = new Error('TRN is required');
+        (err as any).status = 400;
+        throw err;
+      }
 
       const allowed = req.checkpointCodes ?? [];
       if (!hasCheckpointAccess(checkpointCode, allowed)) {
@@ -921,25 +1016,37 @@ class StockController {
 
       const sim = await prisma.$transaction(async (tx) => {
         const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
-        if (!checkpoint) throw new Error('Checkpoint not found');
+        if (!checkpoint) {
+          const err = new Error('Checkpoint not found');
+          (err as any).status = 404;
+          throw err;
+        }
 
         if (type === "SIMCARD" || type === "ESIM") {
           const number = await tx.number.findUnique({ where: { key: numberKey, status: "VERIFIED" } });
           if (!number) {
-            throw new Error('Number not found');
+            const err = new Error('Number not found or not verified');
+            (err as any).status = 404;
+            throw err;
           }
           if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
-            throw new Error('Number checkpoint code does not match checkpoint code');
+            const err = new Error('Number belongs to a different checkpoint');
+            (err as any).status = 409;
+            throw err;
           }
           await tx.number.update({ where: { key: numberKey }, data: { status: 'SOLD' } });
         }
         if (type === "SIMCARD") {
           const card = await tx.card.findUnique({ where: { key: cardKey, status: "VERIFIED" } });
           if (!card) {
-            throw new Error('Card not found');
+            const err = new Error('Card not found or not verified');
+            (err as any).status = 404;
+            throw err;
           }
           if (checkpoint.code !== card.checkpointCode) {
-            throw new Error('Checkpoint code does not match card checkpoint code');
+            const err = new Error('Card is not at the specified checkpoint');
+            (err as any).status = 409;
+            throw err;
           }
           await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
           const stock = await tx.cardStock.findFirst({
@@ -947,7 +1054,9 @@ class StockController {
             orderBy: { createdAt: 'desc' }
           });
           if (!stock || Number(stock.amount) <= 0) {
-            throw new Error('Card unavailable');
+            const err = new Error('No stock available at this checkpoint');
+            (err as any).status = 409;
+            throw err;
           }
           await Promise.all([
             tx.cardStock.create({
@@ -1069,10 +1178,10 @@ class StockController {
           contains: remark as string, mode: 'insensitive'
         }
       }
-      if (sort) {
-        if (sort !== "ASC"  && sort !== "DESC") {
-          throw new Error ("Sort field can only be filled with 'ASC' or 'DESC'")
-        }
+      if (sort && sort !== "ASC" && sort !== "DESC") {
+        const err = new Error("sort must be 'ASC' or 'DESC'");
+        (err as any).status = 400;
+        throw err;
       }
 
       const [numbers, total] = await Promise.all([

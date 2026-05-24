@@ -1,73 +1,13 @@
-enum CheckpointType {
-  DC
-  STORE
-  HQ
-}
-
-enum MergeType {
-  SIMCARD
-  ESIM
-}
-
-enum ItemStatus {
-  VERIFIED
-  SOLD
-  BROKEN
-  LOST
-  DELIVERY
-  OPNAME
-  HOLD
-  UNVERIFIED
-}
-
-enum UploadBatchStatus {
-  ONGOING
-  COMPLETED
-}
-
-enum DistributionStatus {
-  DELIVERED
-  SCHEDULED
-  HOLD
-  CANCELLED
-}
-
-enum MovementType {
-  INITIAL
-  TRANSFER
-  SALE
-  ADJUSTMENT
-  RETURN
-  OPNAME
-}
-
-enum OpnameItemType {
-  ICCID
-  MSISDN
-}
-
-enum OpnameStatus {
-  ONGOING
-  COMPLETED
-  CANCELLED
-}
-
-enum OpnameConditionStatus {
-  OK
-  BROKEN
-  LOST
-}
-
 //
 // CORE TABLES
 //
 
 model Checkpoint {
-  id        Int            @id @default(autoincrement())
-  code      String         @unique
-  type      CheckpointType
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  type      String
   name      String
-  createdAt DateTime       @default(now())
+  createdAt DateTime @default(now())
 
   cards                   Card[]
   cardStock               CardStock[]
@@ -85,19 +25,19 @@ model Checkpoint {
 }
 
 model Card {
-  id             Int        @id @default(autoincrement())
+  id             Int      @id @default(autoincrement())
   name           String?
-  key            String     @unique
+  key            String   @unique
   checkpointCode String
-  status         ItemStatus @default(UNVERIFIED)
+  status         String   @default("UNVERIFIED")
   remark         String?
   batchCode      String
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
   validatedAt    DateTime?
 
-  checkpoint        Checkpoint        @relation(fields: [checkpointCode], references: [code])
-  uploadBatch       UploadBatch        @relation(fields: [batchCode], references: [code])
+  checkpoint        Checkpoint        @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  uploadBatch       UploadBatch       @relation(fields: [batchCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
   movements         CardMovement[]
   distributionItems DistributionItem[]
   merge             Merge?
@@ -108,20 +48,20 @@ model Card {
 }
 
 model Number {
-  id             Int     @id @default(autoincrement())
+  id             Int      @id @default(autoincrement())
   name           String?
-  key            String     @unique
+  key            String   @unique
   checkpointCode String?
-  status         ItemStatus @default(VERIFIED)
+  status         String   @default("VERIFIED")
   remark         String?
   batchCode      String
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  checkpoint Checkpoint?     @relation(fields: [checkpointCode], references: [code])
-  uploadBatch UploadBatch    @relation(fields: [batchCode], references: [code])
-  movements  NumberMovement[]
-  merge      Merge?
+  checkpoint  Checkpoint?      @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  uploadBatch UploadBatch      @relation(fields: [batchCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  movements   NumberMovement[]
+  merge       Merge?
 
   @@index([batchCode])
   @@index([checkpointCode])
@@ -139,11 +79,11 @@ model UploadBatch {
   userCode  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  status    UploadBatchStatus @default(ONGOING)
+  status    String   @default("ONGOING")
   total     Int      @default(0)
   note      String?
 
-  user     User                @relation(fields: [userCode], references: [code])
+  user     User                  @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
   cards    Card[]
   numbers  Number[]
   progress UploadBatchProgress[]
@@ -156,7 +96,7 @@ model UploadBatchProgress {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  batch UploadBatch @relation(fields: [batchCode], references: [code])
+  batch UploadBatch @relation(fields: [batchCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 }
 
 //
@@ -164,40 +104,40 @@ model UploadBatchProgress {
 //
 
 model Merge {
-  id         Int    @id @default(autoincrement())
-  numberKey  String    @unique
-  cardKey    String    @unique
-  remark     String?
+  id             Int       @id @default(autoincrement())
+  numberKey      String    @unique
+  cardKey        String    @unique
+  remark         String?
   checkpointCode String?
-  userCode   String
-  TRN        String?
-  soldAt     DateTime?
-  createdAt  DateTime  @default(now())
-  verifiedAt DateTime?
+  userCode       String
+  TRN            String?
+  soldAt         DateTime?
+  createdAt      DateTime  @default(now())
+  verifiedAt     DateTime?
 
-  card       Card        @relation(fields: [cardKey], references: [key])
-  number     Number      @relation(fields: [numberKey], references: [key])
-  checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code])
-  user       User        @relation(fields: [userCode], references: [code])
+  card       Card        @relation(fields: [cardKey], references: [key], onUpdate: NoAction, onDelete: NoAction)
+  number     Number      @relation(fields: [numberKey], references: [key], onUpdate: NoAction, onDelete: NoAction)
+  checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  user       User        @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([soldAt])
 }
 
 model MergeAdditional {
-  id         Int    @id @default(autoincrement())
-  numberKey  String    @unique
-  cardKey    String    @unique
-  remark     String?
+  id             Int       @id @default(autoincrement())
+  numberKey      String    @unique
+  cardKey        String    @unique
+  remark         String?
   checkpointCode String?
-  userCode   String
-  TRN        String?
-  type       String?   
-  soldAt     DateTime?
-  createdAt  DateTime  @default(now())
-  verifiedAt DateTime?
+  userCode       String
+  TRN            String?
+  type           String?
+  soldAt         DateTime?
+  createdAt      DateTime  @default(now())
+  verifiedAt     DateTime?
 
-  checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code])
-  user       User        @relation(fields: [userCode], references: [code])
+  checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  user       User        @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([soldAt])
 }
@@ -213,7 +153,7 @@ model CardStock {
   updatedAt      DateTime @updatedAt
   createdAt      DateTime @default(now())
 
-  checkpoint Checkpoint @relation(fields: [checkpointCode], references: [code])
+  checkpoint Checkpoint @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([checkpointCode])
 }
@@ -223,36 +163,36 @@ model CardStock {
 //
 
 model CardMovement {
-  id         Int       @id @default(autoincrement())
+  id         Int      @id @default(autoincrement())
   cardID     Int
-  type       MovementType
+  type       String
   userCode   String
   sourceCode String?
   targetCode String?
-  createdAt  DateTime     @default(now())
+  createdAt  DateTime @default(now())
 
-  card   Card        @relation(fields: [cardID], references: [id])
-  source Checkpoint? @relation(name: "CardMovementSource", fields: [sourceCode], references: [code])
-  target Checkpoint? @relation(name: "CardMovementTarget", fields: [targetCode], references: [code])
-  user   User        @relation(fields: [userCode], references: [code])
+  card   Card        @relation(fields: [cardID], references: [id], onUpdate: NoAction, onDelete: NoAction)
+  source Checkpoint? @relation(name: "CardMovementSource", fields: [sourceCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  target Checkpoint? @relation(name: "CardMovementTarget", fields: [targetCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  user   User        @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([cardID])
   @@index([createdAt])
 }
 
 model NumberMovement {
-  id         Int       @id @default(autoincrement())
+  id         Int      @id @default(autoincrement())
   numberID   Int
-  type       MovementType
+  type       String
   userCode   String
   sourceCode String?
   targetCode String?
-  createdAt  DateTime     @default(now())
+  createdAt  DateTime @default(now())
 
-  number Number      @relation(fields: [numberID], references: [id])
-  source Checkpoint? @relation(name: "NumberMovementSource", fields: [sourceCode], references: [code])
-  target Checkpoint? @relation(name: "NumberMovementTarget", fields: [targetCode], references: [code])
-  user   User        @relation(fields: [userCode], references: [code])
+  number Number      @relation(fields: [numberID], references: [id], onUpdate: NoAction, onDelete: NoAction)
+  source Checkpoint? @relation(name: "NumberMovementSource", fields: [sourceCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  target Checkpoint? @relation(name: "NumberMovementTarget", fields: [targetCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  user   User        @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([numberID])
   @@index([createdAt])
@@ -263,52 +203,52 @@ model NumberMovement {
 //
 
 model Distribution {
-  id         Int             @id @default(autoincrement())
-  sourceCode String
-  targetCode String
-  batch      String?
-  amount     Int
-  status     DistributionStatus
-  userCode   String
-  scheduledAt DateTime?
-  completedAt DateTime?
-  createdAt  DateTime           @default(now())
+  id           Int       @id @default(autoincrement())
+  sourceCode   String
+  targetCode   String
+  batch        String?
+  amount       Int
+  status       String
+  userCode     String
+  scheduledAt  DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
 
   items       DistributionItem[]
   submittance DistributionSubmittance?   @relation("DistributionSubmittance")
-  source      Checkpoint                @relation(name: "DistributionSource", fields: [sourceCode], references: [code])
-  target      Checkpoint                @relation(name: "DistributionTarget", fields: [targetCode], references: [code])
-  user        User                      @relation(fields: [userCode], references: [code])
+  source      Checkpoint                @relation(name: "DistributionSource", fields: [sourceCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  target      Checkpoint                @relation(name: "DistributionTarget", fields: [targetCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  user        User                      @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 }
 
 model DistributionSubmittance {
-  id         Int         @id @default(autoincrement())
-  distributionID Int     @unique
-  userCode   String
-  longitude  Float?
-  latitude   Float?
-  signURL    String?
-  imageURL   String?
-  storeURL   String?
-  note       String?
-  recipientName String?
-  recipientURL String?
-  createdAt  DateTime           @default(now())
+  id             Int       @id @default(autoincrement())
+  distributionID Int       @unique
+  userCode       String
+  longitude      Float?
+  latitude       Float?
+  signURL        String?
+  imageURL       String?
+  storeURL       String?
+  note           String?
+  recipientName  String?
+  recipientURL   String?
+  createdAt      DateTime  @default(now())
 
-  distribution Distribution @relation("DistributionSubmittance", fields: [distributionID], references: [id])
-  user         User         @relation(fields: [userCode], references: [code])
+  distribution Distribution @relation("DistributionSubmittance", fields: [distributionID], references: [id], onUpdate: NoAction, onDelete: NoAction)
+  user         User         @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([distributionID])
 }
 
 model DistributionItem {
-  id             Int   @id @default(autoincrement())
+  id             Int      @id @default(autoincrement())
   itemKey        String
   distributionID Int
   createdAt      DateTime @default(now())
 
-  card         Card         @relation(fields: [itemKey], references: [key])
-  distribution Distribution @relation(fields: [distributionID], references: [id])
+  card         Card         @relation(fields: [itemKey], references: [key], onUpdate: NoAction, onDelete: NoAction)
+  distribution Distribution @relation(fields: [distributionID], references: [id], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([distributionID])
 }
@@ -318,57 +258,57 @@ model DistributionItem {
 //
 
 model Opname {
-  id             Int         @id @default(autoincrement())
+  id             Int      @id @default(autoincrement())
   amount         Int
   progress       Int
   batch          String
-  status         OpnameStatus
-  type           OpnameItemType
+  status         String
+  type           String
   checkpointCode String
   userCode       String
-  createdAt      DateTime       @default(now())
+  createdAt      DateTime @default(now())
 
   updates     OpnameUpdate[]
-  user        User              @relation(fields: [userCode], references: [code])
-  checkpoint  Checkpoint        @relation(fields: [checkpointCode], references: [code])
+  user        User               @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  checkpoint  Checkpoint         @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
   submittance OpnameSubmittance?
 }
 
 model OpnameSubmittance {
-  id         Int         @id @default(autoincrement())
-  opnameID   Int         @unique
-  userCode   String
-  signURL    String?
-  picSignURL String?
-  picName    String?
+  id               Int      @id @default(autoincrement())
+  opnameID         Int      @unique
+  userCode         String
+  signURL          String?
+  picSignURL       String?
+  picName          String?
   documentationURL String?
-  note       String?
-  createdAt  DateTime           @default(now())
+  note             String?
+  createdAt        DateTime @default(now())
 
-  opname Opname @relation(fields: [opnameID], references: [id])
+  opname         Opname                          @relation(fields: [opnameID], references: [id], onUpdate: NoAction, onDelete: NoAction)
   documentations OpnameSubmittanceDocumentation[]
-  user   User   @relation(fields: [userCode], references: [code])
+  user           User                            @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 }
 
 model OpnameSubmittanceDocumentation {
-  id            Int         @id @default(autoincrement())
+  id            Int      @id @default(autoincrement())
   submittanceID Int
   url           String
-  createdAt     DateTime    @default(now())
+  createdAt     DateTime @default(now())
 
-  submittance OpnameSubmittance @relation(fields: [submittanceID], references: [id])
+  submittance OpnameSubmittance @relation(fields: [submittanceID], references: [id], onUpdate: NoAction, onDelete: NoAction)
 }
 
 model OpnameUpdate {
-  id        Int                @id @default(autoincrement())
+  id        Int      @id @default(autoincrement())
   itemID    Int
-  status    OpnameConditionStatus
+  status    String
   opnameID  Int
   userCode  String
-  createdAt DateTime              @default(now())
+  createdAt DateTime @default(now())
 
-  opname Opname @relation(fields: [opnameID], references: [id])
-  user   User   @relation(fields: [userCode], references: [code])
+  opname Opname @relation(fields: [opnameID], references: [id], onUpdate: NoAction, onDelete: NoAction)
+  user   User   @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
 
   @@index([itemID])
 }

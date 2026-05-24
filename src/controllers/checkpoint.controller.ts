@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
 import { Prisma } from '../../generated/prisma/client';
-import { CheckpointType } from '../../generated/prisma/enums';
+
 import { hasCheckpointAccess } from '../utils/access.util';
 
 class CheckpointController {
@@ -15,7 +15,7 @@ class CheckpointController {
         throw err;
       }
 
-      const validTypes = Object.values(CheckpointType);
+      const validTypes = ['DC', 'STORE', 'HQ'];
       if (!validTypes.includes(type)) {
         const err = new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
         (err as any).status = 400;
@@ -171,7 +171,7 @@ class CheckpointController {
       const allowed = req.checkpointCodes ?? [];
 
       if (type) {
-        const validTypes = Object.values(CheckpointType);
+        const validTypes = ['DC', 'STORE', 'HQ'];
         if (!validTypes.includes(type)) {
           const err = new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
           (err as any).status = 400;

@@ -12,11 +12,31 @@ class DistributionController {
       const { targetCode, scheduledAt, cardKeys } = req.body;
 
       if (!req.user) throw new Error('User not found');
-      if (!targetCode) throw new Error('targetCode is required');
-      if (!Array.isArray(cardKeys)) throw new Error('Cards must be an array');
-      if (cardKeys.length === 0) throw new Error('Cards array cannot be empty');
-      if (!scheduledAt) throw new Error('scheduledAt is required');
-      if (isNaN(new Date(scheduledAt).getTime())) throw new Error('scheduledAt is not a valid date');
+      if (!targetCode) {
+        const err = new Error('targetCode is required');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (!Array.isArray(cardKeys)) {
+        const err = new Error('cardKeys must be an array');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (cardKeys.length === 0) {
+        const err = new Error('cardKeys array cannot be empty');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (!scheduledAt) {
+        const err = new Error('scheduledAt is required');
+        (err as any).status = 400;
+        throw err;
+      }
+      if (isNaN(new Date(scheduledAt).getTime())) {
+        const err = new Error('scheduledAt is not a valid date');
+        (err as any).status = 422;
+        throw err;
+      }
 
       const allowed = req.checkpointCodes ?? [];
 
@@ -26,7 +46,9 @@ class DistributionController {
 
         const targetCheckpoint = await tx.checkpoint.findUnique({ where: { code: targetCode } });
         if (!targetCheckpoint) {
-          throw new Error('Target checkpoint not found');
+          const err = new Error('Target checkpoint not found');
+          (err as any).status = 404;
+          throw err;
         }
 
         // Only consider cards that are at checkpoints within the user's circle
@@ -39,7 +61,9 @@ class DistributionController {
         });
 
         if (foundCards.length === 0) {
-          throw new Error('No verified cards found');
+          const err = new Error('No verified cards found for the given keys');
+          (err as any).status = 422;
+          throw err;
         }
 
         const missingKeys = cardKeys.filter(key => !foundCards.some(card => card.key === key));
@@ -48,7 +72,9 @@ class DistributionController {
 
         if (targetCode && distinctSourceCodes.includes(targetCode)) {
           const rejectedKeys = foundCards.filter(card => card.checkpointCode === targetCode).map(card => card.key);
-          throw new Error(`Cards [${ rejectedKeys.join(", ") }] are already at checkpoint ${ targetCode }. Please deselect them and resubmit.`);
+          const err = new Error(`Cards [${rejectedKeys.join(", ")}] are already at checkpoint ${targetCode}`);
+          (err as any).status = 422;
+          throw err;
         }
 
         await tx.card.updateMany({
@@ -224,12 +250,16 @@ class DistributionController {
 
       const updatedDistribution = await prisma.$transaction(async (tx) => {
         if (!status) {
-          throw new Error('Status is required');
+          const err = new Error('Status is required');
+          (err as any).status = 400;
+          throw err;
         }
 
         const allowedStatuses = ["SCHEDULED", "DELIVERY"];
         if (!allowedStatuses.includes(status)) {
-          throw new Error('Invalid distribution status. Use the submit endpoint to mark as delivered, or the cancel endpoint to cancel');
+          const err = new Error('Invalid status. Use the submit endpoint to mark as delivered, or the cancel endpoint to cancel');
+          (err as any).status = 400;
+          throw err;
         }
 
         const distribution = await tx.distribution.findUnique({
@@ -260,7 +290,9 @@ class DistributionController {
         }
 
         if (distribution.items.length === 0) {
-          throw new Error('Distribution has no items');
+          const err = new Error('Distribution has no items');
+          (err as any).status = 422;
+          throw err;
         }
 
         const itemKeys = distribution.items.map(item => item.itemKey);
@@ -314,11 +346,15 @@ class DistributionController {
         }
 
         if (currentDistribution.status === "DELIVERED") {
-          throw new Error('Cannot cancel a delivered distribution');
+          const err = new Error('Cannot cancel a delivered distribution');
+          (err as any).status = 409;
+          throw err;
         }
 
         if (currentDistribution.status === "CANCELLED") {
-          throw new Error('Distribution already cancelled');
+          const err = new Error('Distribution is already cancelled');
+          (err as any).status = 409;
+          throw err;
         }
         
         const updatedDistribution = await tx.distribution.update({
@@ -385,7 +421,9 @@ class DistributionController {
         }
 
         if (distribution.status === "DELIVERED") {
-          throw new Error('Distribution is already completed');
+          const err = new Error('Distribution is already delivered');
+          (err as any).status = 409;
+          throw err;
         }
 
         const itemKeys = distribution.items.map(item => item.itemKey);
@@ -406,7 +444,9 @@ class DistributionController {
         ]);
 
         if (holdCount !== itemKeys.length) {
-          throw new Error('Some cards are no longer available for distribution');
+          const err = new Error('Some cards are no longer available for distribution');
+          (err as any).status = 409;
+          throw err;
         }
 
         if (!sourceStock) {

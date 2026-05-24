@@ -17,7 +17,14 @@ class Auth {
         throw err;
       }
 
-      const decoded = JWT.verify(token) as { code: string };
+      let decoded: { code: string };
+      try {
+        decoded = JWT.verify(token) as { code: string };
+      } catch {
+        const err = new Error('Unauthorized');
+        (err as any).status = 401;
+        throw err;
+      }
 
       const user = await prisma.user.findFirst({
         where: {
