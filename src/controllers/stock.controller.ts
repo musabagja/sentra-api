@@ -854,6 +854,104 @@ class StockController {
     }
   }
 
+  static async uploadSoldExcel(req: Request, res: Response, next: NextFunction) {
+    try {
+      const file = (req as any).file;
+
+      if (!file) {
+        const err = new Error('No file uploaded');
+        (err as any).status = 400;
+        throw err;
+      }
+
+      const workbook = xlsx.read(file.buffer, { type: 'buffer' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]!];
+      if (!sheet) {
+        const err = new Error('Excel file has no sheets');
+        (err as any).status = 422;
+        throw err;
+      }
+
+      const rows: any[] = xlsx.utils.sheet_to_json(sheet);
+
+      type SoldRow = { iccid: string; msisdn: string; storeCode: string };
+      const parsed: SoldRow[] = [];
+      const seen = new Set<string>();
+      for (const r of rows) {
+        const iccid     = String(r.ICCID     ?? r.iccid     ?? '').trim();
+        const msisdn    = String(r.MSISDN    ?? r.msisdn    ?? '').trim();
+        const storeCode = String(r.STORE_CODE ?? r.store_code ?? '').trim();
+        if (!iccid || seen.has(iccid)) continue;
+        seen.add(iccid);
+        parsed.push({ iccid, msisdn, storeCode });
+      }
+
+      if (parsed.length === 0) {
+        const err = new Error('No ICCID values found in the file');
+        (err as any).status = 422;
+        throw err;
+      }
+
+      const iccids = parsed.map(r => r.iccid);
+
+      // Look up which ICCIDs have a Merge record (= sold)
+      const merges = await prisma.merge.findMany({
+        where: { cardKey: { in: iccids } },
+        select: { cardKey: true, numberKey: true, verifiedAt: true }
+      });
+
+      const mergeMap = new Map(merges.map(m => [m.cardKey, m]));
+
+      const notSold: string[]    = [];
+      const mismatched: string[] = [];
+
+      for (const row of parsed) {
+        const merge = mergeMap.get(row.iccid);
+        if (!merge) {
+          notSold.push(row.iccid);
+        } else if (row.msisdn && merge.numberKey !== row.msisdn) {
+          mismatched.push(`${row.iccid} (expected MSISDN ${merge.numberKey}, got ${row.msisdn})`);
+        }
+      }
+
+      const errors: string[] = [];
+      if (notSold.length > 0)    errors.push(`not sold: ${notSold.join(', ')}`);
+      if (mismatched.length > 0) errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
+
+      if (errors.length > 0) {
+        const err = new Error(errors.join(' | '));
+        (err as any).status = 422;
+        throw err;
+      }
+
+      const toUpdate = iccids.filter(k => mergeMap.get(k)!.verifiedAt === null);
+      const skipped  = iccids.length - toUpdate.length;
+
+      const today = new Date();
+
+      if (toUpdate.length > 0) {
+        await prisma.$transaction([
+          prisma.merge.updateMany({
+            where: { cardKey: { in: toUpdate } },
+            data: { verifiedAt: today }
+          }),
+          // Stamp validatedAt on the card itself for keys not yet stamped
+          prisma.card.updateMany({
+            where: { key: { in: toUpdate }, validatedAt: null },
+            data: { validatedAt: today }
+          })
+        ]);
+      }
+
+      res.status(200).json({
+        message: 'Sold cards updated successfully',
+        data: { total: iccids.length, updated: toUpdate.length, skipped }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async downloadExcel(req: Request, res: Response, next: NextFunction) {
     try {
       

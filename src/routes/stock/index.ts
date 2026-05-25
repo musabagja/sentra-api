@@ -50,6 +50,9 @@ router.delete('/numbers/:key', StockController.deleteNumber);
 // POST /api/upload/xlsx - Upload bunch of cards from Excel file
 router.post('/upload/xlsx', upload('xlsx').single('source'), StockController.uploadExcel);
 
+// POST /api/stock/upload/sold-xlsx - Mark sold cards as verified via Excel
+router.post('/upload/sold-xlsx', upload('xlsx').single('source'), StockController.uploadSoldExcel);
+
 // POST /api/stock/merge - Merge card and number
 router.post('/merges', StockController.mergeSim);
 
