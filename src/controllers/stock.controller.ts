@@ -894,16 +894,24 @@ class StockController {
 
       const iccids = parsed.map(r => r.iccid);
 
-      // Look up which ICCIDs have a Merge record (= sold)
-      const merges = await prisma.merge.findMany({
-        where: { cardKey: { in: iccids } },
-        select: { cardKey: true, numberKey: true, verifiedAt: true }
-      });
+      // Fetch merge records and card validatedAt in parallel
+      const [merges, unvalidatedCards] = await Promise.all([
+        prisma.merge.findMany({
+          where: { cardKey: { in: iccids } },
+          select: { cardKey: true, numberKey: true, verifiedAt: true }
+        }),
+        prisma.card.findMany({
+          where: { key: { in: iccids }, validatedAt: null },
+          select: { key: true }
+        })
+      ]);
 
-      const mergeMap = new Map(merges.map(m => [m.cardKey, m]));
+      const mergeMap        = new Map(merges.map(m => [m.cardKey, m]));
+      const unvalidatedSet  = new Set(unvalidatedCards.map(c => c.key));
 
-      const notSold: string[]    = [];
-      const mismatched: string[] = [];
+      const notSold: string[]       = [];
+      const mismatched: string[]    = [];
+      const neverValidated: string[] = [];
 
       for (const row of parsed) {
         const merge = mergeMap.get(row.iccid);
@@ -911,12 +919,15 @@ class StockController {
           notSold.push(row.iccid);
         } else if (row.msisdn && merge.numberKey !== row.msisdn) {
           mismatched.push(`${row.iccid} (expected MSISDN ${merge.numberKey}, got ${row.msisdn})`);
+        } else if (unvalidatedSet.has(row.iccid)) {
+          neverValidated.push(row.iccid);
         }
       }
 
       const errors: string[] = [];
-      if (notSold.length > 0)    errors.push(`not sold: ${notSold.join(', ')}`);
-      if (mismatched.length > 0) errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
+      if (notSold.length > 0)       errors.push(`not sold: ${notSold.join(', ')}`);
+      if (mismatched.length > 0)    errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
+      if (neverValidated.length > 0) errors.push(`never validated: ${neverValidated.join(', ')}`);
 
       if (errors.length > 0) {
         const err = new Error(errors.join(' | '));
@@ -927,20 +938,11 @@ class StockController {
       const toUpdate = iccids.filter(k => mergeMap.get(k)!.verifiedAt === null);
       const skipped  = iccids.length - toUpdate.length;
 
-      const today = new Date();
-
       if (toUpdate.length > 0) {
-        await prisma.$transaction([
-          prisma.merge.updateMany({
-            where: { cardKey: { in: toUpdate } },
-            data: { verifiedAt: today }
-          }),
-          // Stamp validatedAt on the card itself for keys not yet stamped
-          prisma.card.updateMany({
-            where: { key: { in: toUpdate }, validatedAt: null },
-            data: { validatedAt: today }
-          })
-        ]);
+        await prisma.merge.updateMany({
+          where: { cardKey: { in: toUpdate } },
+          data: { verifiedAt: new Date() }
+        });
       }
 
       res.status(200).json({
