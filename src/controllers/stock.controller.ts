@@ -9,76 +9,102 @@ class StockController {
   static async dashboardSync (req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
-      const year = Number(req.query.year) || new Date().getFullYear();
-      const dcCode = req.query.dcCode as string | undefined;
+      const dcCode    = req.query.dcCode    as string | undefined;
       const storeCode = req.query.storeCode as string | undefined;
 
+      const now          = new Date();
+      const currentYear  = now.getFullYear();
+      const currentMonth = now.getMonth() + 1; // 1-indexed
+
+      const year  = Number(req.query.year)  || currentYear;
+      const month = Number(req.query.month) || currentMonth;
+
+      // Cutoff: end of today when viewing the current month, otherwise last day of the requested month
+      const isCurrentPeriod = year === currentYear && month === currentMonth;
+      const cutoff = isCurrentPeriod
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+        : new Date(year, month, 0, 23, 59, 59, 999); // day 0 of next month = last day of this month
+
       const yearStart = new Date(year, 0, 1);
-      const yearEnd   = new Date(year, 11, 31, 23, 59, 59, 999);
 
       const scopeFilter = {
         status: 'DELIVERED' as const,
-        OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }]
+        OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }],
+        createdAt: { lte: cutoff }
       };
 
       const dcMonthlyWhere = {
         ...scopeFilter,
         target: { type: 'DC', ...(dcCode && { code: dcCode }) },
-        createdAt: { gte: yearStart, lte: yearEnd }
+        createdAt: { gte: yearStart, lte: cutoff }
       };
 
       const storeMonthlyWhere = {
         ...scopeFilter,
         target: { type: 'STORE', ...(storeCode && { code: storeCode }) },
-        createdAt: { gte: yearStart, lte: yearEnd }
+        createdAt: { gte: yearStart, lte: cutoff }
       };
 
       const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards, topSaleByUser, dcMonthlyRows, storeMonthlyRows] = await Promise.all([
-        // 1. Cards distributed TO DC checkpoints (all-time total)
+        // 1. Cards distributed TO DC checkpoints up to cutoff
         prisma.distribution.aggregate({
           _sum: { amount: true },
           where: { ...scopeFilter, target: { type: 'DC' } }
         }),
 
-        // 2. Cards distributed TO STORE checkpoints (all-time total)
+        // 2. Cards distributed TO STORE checkpoints up to cutoff
         prisma.distribution.aggregate({
           _sum: { amount: true },
           where: { ...scopeFilter, target: { type: 'STORE' } }
         }),
 
-        // Shared checkpoint fetch — split into STORE/DC in JS
+        // Shared checkpoint fetch — latest stock snapshot up to cutoff
         prisma.checkpoint.findMany({
           where: { code: { in: allowed } },
-          include: { cardStock: { orderBy: { createdAt: 'desc' }, take: 1 } }
+          include: {
+            cardStock: {
+              where: { createdAt: { lte: cutoff } },
+              orderBy: { createdAt: 'desc' },
+              take: 1
+            }
+          }
         }),
 
-        // 5a. Base initial stock: VERIFIED + SOLD + DELIVERY + OPNAME
+        // Base initial stock: active cards created up to cutoff
         prisma.card.count({
-          where: { checkpointCode: { in: allowed }, status: { in: ['VERIFIED', 'SOLD', 'DELIVERY', 'OPNAME'] } }
+          where: {
+            checkpointCode: { in: allowed },
+            status: { in: ['VERIFIED', 'SOLD', 'DELIVERY', 'OPNAME'] },
+            createdAt: { lte: cutoff }
+          }
         }),
 
-        // 5b. BROKEN/LOST candidates — need to check if opname-traced
+        // BROKEN/LOST candidates — need to check if opname-traced
         prisma.card.findMany({
-          where: { checkpointCode: { in: allowed }, status: { in: ['BROKEN', 'LOST'] } },
+          where: {
+            checkpointCode: { in: allowed },
+            status: { in: ['BROKEN', 'LOST'] },
+            createdAt: { lte: cutoff }
+          },
           select: { id: true }
         }),
 
-        // Top 10 users by total sales (merges) within scope
+        // Top 10 users by total sales (merges) up to cutoff
         prisma.merge.groupBy({
           by: ['userCode'],
-          where: { checkpointCode: { in: allowed } },
+          where: { checkpointCode: { in: allowed }, createdAt: { lte: cutoff } },
           _count: { userCode: true },
           orderBy: { _count: { userCode: 'desc' } },
           take: 10
         }),
 
-        // Monthly DC distributions for selected year
+        // Monthly DC distributions for selected year up to cutoff
         prisma.distribution.findMany({
           where: dcMonthlyWhere,
           select: { amount: true, createdAt: true }
         }),
 
-        // Monthly STORE distributions for selected year
+        // Monthly STORE distributions for selected year up to cutoff
         prisma.distribution.findMany({
           where: storeMonthlyWhere,
           select: { amount: true, createdAt: true }
@@ -90,20 +116,19 @@ class StockController {
         .map(c => c.code);
 
       // Cards that are BROKEN/LOST but discovered via opname still count toward initial stock.
-      // OpnameUpdate.itemID = card.id but no Prisma relation exists, so we resolve in two steps.
       const brokenLostIds = brokenLostCards.map(c => c.id);
       const [opnamedBrokenLostCount, topSaleByCheckpoint] = await Promise.all([
         brokenLostIds.length > 0
           ? prisma.opnameUpdate.groupBy({
               by: ['itemID'],
-              where: { itemID: { in: brokenLostIds } }
+              where: { itemID: { in: brokenLostIds }, createdAt: { lte: cutoff } }
             }).then(groups => groups.length)
           : Promise.resolve(0),
 
-        // Top 10 STORE checkpoints by total sales (merges)
+        // Top 10 STORE checkpoints by total sales (merges) up to cutoff
         prisma.merge.groupBy({
           by: ['checkpointCode'],
-          where: { checkpointCode: { in: storeCheckpointCodes } },
+          where: { checkpointCode: { in: storeCheckpointCodes }, createdAt: { lte: cutoff } },
           _count: { checkpointCode: true },
           orderBy: { _count: { checkpointCode: 'desc' } },
           take: 10
@@ -122,8 +147,7 @@ class StockController {
 
       const initialStock = baseInitialCount + opnamedBrokenLostCount;
 
-      // 6. Final stock: sum of latest CardStock per checkpoint
-      //    (already nets out sales, opname BROKEN/LOST, and adjustments)
+      // Final stock: sum of latest CardStock snapshot per checkpoint up to cutoff
       const finalStock = allCheckpoints.reduce(
         (sum, c) => sum + (c.cardStock[0]?.amount ?? 0), 0
       );
@@ -131,14 +155,12 @@ class StockController {
       const withStock = (c: typeof allCheckpoints[number]) =>
         ({ ...c, currentStock: c.cardStock[0]?.amount ?? 0 });
 
-      // 3. Top 10 STORE checkpoints with least current stock
       const topLeastStoreStock = allCheckpoints
         .filter(c => c.type === 'STORE')
         .map(withStock)
         .sort((a, b) => a.currentStock - b.currentStock)
         .slice(0, 10);
 
-      // 4. Top 10 DC checkpoints with most current stock
       const topMostDCStock = allCheckpoints
         .filter(c => c.type === 'DC')
         .map(withStock)
@@ -147,19 +169,17 @@ class StockController {
 
       const checkpointMap = Object.fromEntries(allCheckpoints.map(c => [c.code, c]));
 
-      // Top 10 STORE checkpoints ranked by highest sales
       const topHighestSaleByCheckpoint = topSaleByCheckpoint.map(row => ({
         checkpoint: checkpointMap[row.checkpointCode!],
         totalSales: row._count.checkpointCode
       }));
 
-      // Top 10 users ranked by highest sales
       const topHighestSaleByUser = topSaleByUser.map(row => ({
         user: userDetailMap[row.userCode] ?? { code: row.userCode, name: null },
         totalSales: row._count.userCode
       }));
 
-      // Build 12-element monthly arrays (index 0 = January … 11 = December)
+      // 12-element monthly arrays — months after cutoff will be 0
       const buildMonthlyTotals = (rows: { amount: number; createdAt: Date }[]) => {
         const months = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
         for (const row of rows) {
@@ -175,6 +195,8 @@ class StockController {
         message: 'Dashboard synced successfully',
         data: {
           year,
+          month,
+          cutoff,
           initialStock,
           finalStock,
           distributedToDC: dcAggregate._sum.amount ?? 0,
