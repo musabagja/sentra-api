@@ -895,38 +895,43 @@ class StockController {
       const iccids = parsed.map(r => r.iccid);
 
       // Fetch merge records and card validatedAt in parallel
-      const [merges, unvalidatedCards] = await Promise.all([
+      const [merges, cards] = await Promise.all([
         prisma.merge.findMany({
           where: { cardKey: { in: iccids } },
           select: { cardKey: true, numberKey: true, verifiedAt: true }
         }),
         prisma.card.findMany({
-          where: { key: { in: iccids }, validatedAt: null },
-          select: { key: true }
+          where: { key: { in: iccids } },
+          select: { key: true, status: true, validatedAt: true }
         })
       ]);
 
-      const mergeMap        = new Map(merges.map(m => [m.cardKey, m]));
-      const unvalidatedSet  = new Set(unvalidatedCards.map(c => c.key));
+      const mergeMap = new Map(merges.map(m => [m.cardKey, m]));
+      const cardMap  = new Map(cards.map(c => [c.key, c]));
 
-      const notSold: string[]       = [];
-      const mismatched: string[]    = [];
+      const notSold: string[]        = [];
+      const mismatched: string[]     = [];
+      const notSoldStatus: string[]  = [];
       const neverValidated: string[] = [];
 
       for (const row of parsed) {
         const merge = mergeMap.get(row.iccid);
+        const card  = cardMap.get(row.iccid);
         if (!merge) {
           notSold.push(row.iccid);
         } else if (row.msisdn && merge.numberKey !== row.msisdn) {
           mismatched.push(`${row.iccid} (expected MSISDN ${merge.numberKey}, got ${row.msisdn})`);
-        } else if (unvalidatedSet.has(row.iccid)) {
+        } else if (!card || card.status !== 'SOLD') {
+          notSoldStatus.push(row.iccid);
+        } else if (!card.validatedAt) {
           neverValidated.push(row.iccid);
         }
       }
 
       const errors: string[] = [];
-      if (notSold.length > 0)       errors.push(`not sold: ${notSold.join(', ')}`);
-      if (mismatched.length > 0)    errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
+      if (notSold.length > 0)        errors.push(`not in merge: ${notSold.join(', ')}`);
+      if (mismatched.length > 0)     errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
+      if (notSoldStatus.length > 0)  errors.push(`card not SOLD: ${notSoldStatus.join(', ')}`);
       if (neverValidated.length > 0) errors.push(`never validated: ${neverValidated.join(', ')}`);
 
       if (errors.length > 0) {
