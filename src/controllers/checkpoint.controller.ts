@@ -95,7 +95,7 @@ class CheckpointController {
             }
           }
         },
-        orderBy: { createdAt: 'desc' }
+        orderBy: { id: 'asc' }
       };
 
       const [checkpoints, total] = await Promise.all([

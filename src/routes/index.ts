@@ -18,6 +18,21 @@ const router = express.Router();
 // User authentication routes (no auth required)
 router.use('/user', userRouter);
 
+// Health check — must be before auth middleware
+router.get("/", (req: any, res: any) => {
+  return res.status(200).send({
+    message: "Sentra API is running!!",
+    version: "1.0.0",
+    endpoints: {
+      user: "/api/user",
+      stock: "/api/stock",
+      opname: "/api/opname",
+      distribution: "/api/distribution",
+      checkpoint: "/api/checkpoint"
+    }
+  });
+});
+
 // All routes below require authentication + checkpoint scope resolution
 router.use(Auth.authenticate);
 router.use(CheckpointAccess.load);
@@ -34,22 +49,5 @@ router.use('/distribution', distributionRouter);
 // Checkpoint routes
 router.use('/checkpoint', checkpointRouter);
 
-// ============================================================================
-// HEALTH CHECK
-// ============================================================================
-
-router.get("/", (req: any, res: any) => {
-  return res.status(200).send({
-    message: "Sentra API is running!!",
-    version: "1.0.0",
-    endpoints: {
-      user: "/api/user",
-      stock: "/api/stock",
-      opname: "/api/opname",
-      distribution: "/api/distribution",
-      checkpoint: "/api/checkpoint"
-    }
-  });
-});
 
 export default router;

@@ -127,6 +127,12 @@ class OpnameController {
       const { checkpointCode, type = 'ICCID' } = req.body;
       const allowed = req.checkpointCodes ?? [];
 
+      if (!checkpointCode) {
+        const err = new Error('checkpointCode is required');
+        (err as any).status = 400;
+        throw err;
+      }
+
       const validTypes = ['ICCID', 'MSISDN'];
       if (!validTypes.includes(type)) {
         const err = new Error(`Invalid opname type. Must be one of: ${validTypes.join(', ')}`);

@@ -74,7 +74,7 @@ class UserController {
 
       const refreshToken = JWT.sign({ session: session.id }, { expiresIn: '7d' });
       const accessToken = JWT.sign(
-        { id: user.id, name: user.name, code: user.code },
+        { id: user.id, name: user.name, code: user.code, session: session.id },
         { expiresIn: '15m' }
       );
 
@@ -164,7 +164,7 @@ class UserController {
 
       const newRefreshToken = JWT.sign({ session: newSession.id }, { expiresIn: '7d' });
       const newAccessToken = JWT.sign(
-        { id: user.id, name: user.name, code: user.code },
+        { id: user.id, name: user.name, code: user.code, session: newSession.id },
         { expiresIn: '15m' }
       );
 

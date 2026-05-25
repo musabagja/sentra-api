@@ -17,13 +17,23 @@ class Auth {
         throw err;
       }
 
-      let decoded: { code: string };
+      let decoded: { code: string; session?: string };
       try {
-        decoded = JWT.verify(token) as { code: string };
+        decoded = JWT.verify(token) as { code: string; session?: string };
       } catch {
         const err = new Error('Unauthorized');
         (err as any).status = 401;
         throw err;
+      }
+
+      // Reject tokens whose session was invalidated by sign-out
+      if (decoded.session) {
+        const session = await prisma.session.findFirst({ where: { id: decoded.session } });
+        if (!session) {
+          const err = new Error('Unauthorized');
+          (err as any).status = 401;
+          throw err;
+        }
       }
 
       const user = await prisma.user.findFirst({

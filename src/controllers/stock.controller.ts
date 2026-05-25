@@ -247,7 +247,7 @@ class StockController {
   static async completeBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
-      const { note } = req.body;
+      const { note } = req.body ?? {};
       const allowed = req.checkpointCodes ?? [];
 
       const batch = await prisma.$transaction(async (tx) => {
@@ -491,10 +491,10 @@ class StockController {
 
   static async deleteCard(req: Request, res: Response, next: NextFunction) {
     try {
-      const { id } = req.params;
+      const { key } = req.params;
       const allowed = req.checkpointCodes ?? [];
 
-      const existing = await prisma.card.findUnique({ where: { id: Number(id) } });
+      const existing = await prisma.card.findUnique({ where: { key } });
       if (!existing || !hasCheckpointAccess(existing.checkpointCode, allowed)) {
         const err = new Error('Card not found');
         (err as any).status = 404;
@@ -751,6 +751,12 @@ class StockController {
 
         if (card.status === 'SOLD') {
           const err = new Error('Card has already been sold');
+          (err as any).status = 409;
+          throw err;
+        }
+
+        if (card.status !== 'UNVERIFIED') {
+          const err = new Error(`Card has already been validated`);
           (err as any).status = 409;
           throw err;
         }
