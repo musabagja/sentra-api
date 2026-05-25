@@ -214,6 +214,116 @@ class StockController {
     }
   }
 
+  static async getDCDistributionChart(req: Request, res: Response, next: NextFunction) {
+    try {
+      const allowed = req.checkpointCodes ?? [];
+      const checkpointCode = req.query.checkpointCode as string | undefined;
+
+      const now          = new Date();
+      const currentYear  = now.getFullYear();
+      const currentMonth = now.getMonth() + 1;
+      const year  = Number(req.query.year)  || currentYear;
+      const month = Number(req.query.month) || currentMonth;
+
+      const isCurrentPeriod = year === currentYear && month === currentMonth;
+      const cutoff = isCurrentPeriod
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+        : new Date(year, month, 0, 23, 59, 59, 999);
+
+      const yearStart = new Date(year, 0, 1);
+
+      if (checkpointCode && !allowed.includes(checkpointCode)) {
+        const err = new Error('Checkpoint not found');
+        (err as any).status = 404;
+        throw err;
+      }
+
+      const [dcCheckpoints, rows] = await Promise.all([
+        prisma.checkpoint.findMany({
+          where: { code: { in: allowed }, type: 'DC' },
+          select: { code: true, name: true },
+          orderBy: { name: 'asc' }
+        }),
+        prisma.distribution.findMany({
+          where: {
+            status: 'DELIVERED',
+            OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }],
+            target: { type: 'DC', ...(checkpointCode && { code: checkpointCode }) },
+            createdAt: { gte: yearStart, lte: cutoff }
+          },
+          select: { amount: true, createdAt: true }
+        })
+      ]);
+
+      const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
+      for (const row of rows) {
+        chart[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+      }
+
+      res.status(200).json({
+        message: 'DC distribution chart retrieved successfully',
+        data: { year, month, cutoff, checkpoints: dcCheckpoints, chart }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async getStoreDistributionChart(req: Request, res: Response, next: NextFunction) {
+    try {
+      const allowed = req.checkpointCodes ?? [];
+      const checkpointCode = req.query.checkpointCode as string | undefined;
+
+      const now          = new Date();
+      const currentYear  = now.getFullYear();
+      const currentMonth = now.getMonth() + 1;
+      const year  = Number(req.query.year)  || currentYear;
+      const month = Number(req.query.month) || currentMonth;
+
+      const isCurrentPeriod = year === currentYear && month === currentMonth;
+      const cutoff = isCurrentPeriod
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+        : new Date(year, month, 0, 23, 59, 59, 999);
+
+      const yearStart = new Date(year, 0, 1);
+
+      if (checkpointCode && !allowed.includes(checkpointCode)) {
+        const err = new Error('Checkpoint not found');
+        (err as any).status = 404;
+        throw err;
+      }
+
+      const [storeCheckpoints, rows] = await Promise.all([
+        prisma.checkpoint.findMany({
+          where: { code: { in: allowed }, type: 'STORE' },
+          select: { code: true, name: true },
+          orderBy: { name: 'asc' }
+        }),
+        prisma.distribution.findMany({
+          where: {
+            status: 'DELIVERED',
+            OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }],
+            target: { type: 'STORE', ...(checkpointCode && { code: checkpointCode }) },
+            createdAt: { gte: yearStart, lte: cutoff }
+          },
+          select: { amount: true, createdAt: true }
+        })
+      ]);
+
+      const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
+      for (const row of rows) {
+        chart[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+      }
+
+      res.status(200).json({
+        message: 'Store distribution chart retrieved successfully',
+        data: { year, month, cutoff, checkpoints: storeCheckpoints, chart }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async getBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;

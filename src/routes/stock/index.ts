@@ -60,4 +60,10 @@ router.get('/merges', StockController.getMerges);
 // GET /api/stock/dashboard - Get dashboard data
 router.get('/dashboard', StockController.dashboardSync);
 
+// GET /api/stock/dashboard/dc-distribution - Monthly DC distribution chart
+router.get('/dashboard/dc-distribution', StockController.getDCDistributionChart);
+
+// GET /api/stock/dashboard/store-distribution - Monthly store distribution chart
+router.get('/dashboard/store-distribution', StockController.getStoreDistributionChart);
+
 export default router;
