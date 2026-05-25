@@ -892,47 +892,94 @@ class StockController {
         throw err;
       }
 
-      const iccids = parsed.map(r => r.iccid);
+      const allowed = req.checkpointCodes ?? [];
+      const iccids  = parsed.map(r => r.iccid);
+      const msisdns = parsed.map(r => r.msisdn).filter(Boolean);
 
-      // Fetch merge records and card validatedAt in parallel
-      const [merges, cards] = await Promise.all([
+      // Fetch merges, cards, and numbers in parallel
+      const [merges, cards, numbers] = await Promise.all([
         prisma.merge.findMany({
           where: { cardKey: { in: iccids } },
-          select: { cardKey: true, numberKey: true, verifiedAt: true }
+          select: { cardKey: true, numberKey: true, checkpointCode: true, soldAt: true, verifiedAt: true }
         }),
         prisma.card.findMany({
           where: { key: { in: iccids } },
           select: { key: true, status: true, validatedAt: true }
-        })
+        }),
+        msisdns.length > 0
+          ? prisma.number.findMany({
+              where: { key: { in: msisdns } },
+              select: { key: true, status: true }
+            })
+          : Promise.resolve([])
       ]);
 
-      const mergeMap = new Map(merges.map(m => [m.cardKey, m]));
-      const cardMap  = new Map(cards.map(c => [c.key, c]));
+      const mergeMap  = new Map(merges.map(m => [m.cardKey, m]));
+      const cardMap   = new Map(cards.map(c => [c.key, c]));
+      const numberMap = new Map(numbers.map(n => [n.key, n]));
 
-      const notSold: string[]        = [];
-      const mismatched: string[]     = [];
-      const notSoldStatus: string[]  = [];
-      const neverValidated: string[] = [];
+      const notInMerge: string[]       = [];
+      const storeNotAccessible: string[] = [];
+      const mismatched: string[]       = [];
+      const checkpointMismatch: string[] = [];
+      const noSoldAt: string[]         = [];
+      const notSoldStatus: string[]    = [];
+      const numberNotSold: string[]    = [];
+      const neverValidated: string[]   = [];
 
       for (const row of parsed) {
         const merge = mergeMap.get(row.iccid);
         const card  = cardMap.get(row.iccid);
-        if (!merge) {
-          notSold.push(row.iccid);
-        } else if (row.msisdn && merge.numberKey !== row.msisdn) {
-          mismatched.push(`${row.iccid} (expected MSISDN ${merge.numberKey}, got ${row.msisdn})`);
-        } else if (!card || card.status !== 'SOLD') {
-          notSoldStatus.push(row.iccid);
-        } else if (!card.validatedAt) {
+
+        // 1. Must have a Merge record
+        if (!merge) { notInMerge.push(row.iccid); continue; }
+
+        // 2. STORE_CODE must be in the user's accessible checkpoints
+        if (row.storeCode && !allowed.includes(row.storeCode)) {
+          storeNotAccessible.push(row.iccid); continue;
+        }
+
+        // 3. MSISDN must match merge.numberKey
+        if (row.msisdn && merge.numberKey !== row.msisdn) {
+          mismatched.push(`${row.iccid} (expected ${merge.numberKey}, got ${row.msisdn})`); continue;
+        }
+
+        // 4. merge.checkpointCode must match STORE_CODE
+        if (row.storeCode && merge.checkpointCode !== row.storeCode) {
+          checkpointMismatch.push(`${row.iccid} (sold at ${merge.checkpointCode ?? 'unknown'}, got ${row.storeCode})`); continue;
+        }
+
+        // 5. merge.soldAt must not be null
+        if (!merge.soldAt) {
+          noSoldAt.push(row.iccid); continue;
+        }
+
+        // 6. card.status must be SOLD
+        if (!card || card.status !== 'SOLD') {
+          notSoldStatus.push(row.iccid); continue;
+        }
+
+        // 7. number.status must be SOLD
+        const number = numberMap.get(merge.numberKey);
+        if (!number || number.status !== 'SOLD') {
+          numberNotSold.push(`${row.iccid} (MSISDN ${merge.numberKey} status: ${number?.status ?? 'not found'})`); continue;
+        }
+
+        // 8. card must have been physically validated
+        if (!card.validatedAt) {
           neverValidated.push(row.iccid);
         }
       }
 
       const errors: string[] = [];
-      if (notSold.length > 0)        errors.push(`not in merge: ${notSold.join(', ')}`);
-      if (mismatched.length > 0)     errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
-      if (notSoldStatus.length > 0)  errors.push(`card not SOLD: ${notSoldStatus.join(', ')}`);
-      if (neverValidated.length > 0) errors.push(`never validated: ${neverValidated.join(', ')}`);
+      if (notInMerge.length > 0)        errors.push(`not in merge: ${notInMerge.join(', ')}`);
+      if (storeNotAccessible.length > 0) errors.push(`store not accessible: ${storeNotAccessible.join(', ')}`);
+      if (mismatched.length > 0)        errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
+      if (checkpointMismatch.length > 0) errors.push(`store mismatch: ${checkpointMismatch.join('; ')}`);
+      if (noSoldAt.length > 0)          errors.push(`soldAt missing: ${noSoldAt.join(', ')}`);
+      if (notSoldStatus.length > 0)     errors.push(`card not SOLD: ${notSoldStatus.join(', ')}`);
+      if (numberNotSold.length > 0)     errors.push(`number not SOLD: ${numberNotSold.join('; ')}`);
+      if (neverValidated.length > 0)    errors.push(`never validated: ${neverValidated.join(', ')}`);
 
       if (errors.length > 0) {
         const err = new Error(errors.join(' | '));
