@@ -4,66 +4,103 @@ REST API for managing SIM card stock, opname (stock-taking), and distribution ac
 
 ---
 
+## What's New — 2026-05-25
+
+### SQL Server support
+- Default database is now **Microsoft SQL Server** (`DATABASE_PROVIDER=sqlserver`)
+- PostgreSQL still supported — set `DATABASE_PROVIDER=postgresql` in `.env`
+- All enum fields converted to `String` with application-level validation (SQL Server has no native enum support)
+- All Prisma relations use `onUpdate: NoAction, onDelete: NoAction` to satisfy SQL Server's cascade restriction
+
+### Port changed to 3000
+- API now listens on `PORT=3000` by default
+
+### Session-bound access tokens
+- Access tokens now embed the session ID in the JWT payload
+- Every authenticated request verifies the session still exists in the database — sign-out immediately invalidates outstanding access tokens (no 15-minute grace window)
+
+### Bug fixes
+- `DELETE /api/stock/cards/:key` — was incorrectly looking up by `id`; fixed to use `key`
+- `PUT /api/stock/batches/close/:id` — crash when body was empty; fixed with safe destructure
+- `POST /api/stock/cards/validate/:key` — cards already validated could be re-validated; now returns `409`
+- `GET /api` health check — was blocked by auth middleware; moved before `Auth.authenticate`
+- `POST /api/opname` — missing `checkpointCode` returned misleading `404`; now returns `400 checkpointCode is required`
+- `GET /api/checkpoint` — non-deterministic ordering on SQL Server; changed to `ORDER BY id ASC`
+
+### Dashboard — month/year filter and monthly breakdown
+- `GET /api/stock/dashboard` now accepts `?month` and `?year`
+- All data is cumulative from the start up to the end of the requested month (or today if the current month is requested)
+- Response includes `distributedToDCByMonth` and `distributedToStoreByMonth` — 12-element arrays covering January through December; months after the cutoff are `0`
+
+### New dashboard chart endpoints
+- `GET /api/stock/dashboard/dc-distribution` — monthly DC distribution chart with checkpoint dropdown support
+- `GET /api/stock/dashboard/store-distribution` — monthly store distribution chart with checkpoint dropdown support
+
+---
+
 ## What's New — 2026-05-22
 
 ### Card status lifecycle — new `DELIVERY` and `OPNAME` statuses
 - `HOLD` is replaced by `DELIVERY` for cards reserved in a distribution
-- New `OPNAME` status: all `VERIFIED` cards at a checkpoint are set to `OPNAME` when an opname session starts, making the scope explicit and preventing new cards from being counted as initial stock mid-session
-- `ItemStatus` enum: `VERIFIED | SOLD | BROKEN | LOST | DELIVERY | OPNAME | UNVERIFIED`
+- New `OPNAME` status: all `VERIFIED` cards at a checkpoint are set to `OPNAME` when an opname session starts
+- Card status flow: `UNVERIFIED → VERIFIED → SOLD | BROKEN | LOST | DELIVERY | OPNAME`
 
 ### `POST /api/opname` — scopes cards on creation
-- All `VERIFIED` cards at the checkpoint are atomically set to `OPNAME` status when the session is created
-- `amount` (initial stock) is now derived from an actual `COUNT(VERIFIED)` at creation time, not from the potentially stale `cardStock` counter
+- All `VERIFIED` cards at the checkpoint are atomically set to `OPNAME` when the session is created
+- `amount` is derived from an actual `COUNT(VERIFIED)` at creation time
 
-### `PATCH /api/opname/:id` (scan) — only accepts `OPNAME` cards
-- Rejects any card that does not have `OPNAME` status — prevents scanning cards that weren't part of the initial stock
-- Stock is decremented on scan only for `BROKEN`/`LOST` results (no increment for `OK` — those cards were already counted)
+### `PATCH /api/opname/:id` — only accepts `OPNAME` cards
+- Rejects any card that does not have `OPNAME` status
+- Stock is decremented on scan only for `BROKEN`/`LOST` results
 
 ### `PATCH /api/opname/:id/close` — full status resolution
-- Scanned `OK` → restored to `VERIFIED`; scanned `BROKEN` → `BROKEN`; scanned `LOST` → `LOST`
-- Unscanned `OPNAME` cards are auto-marked `LOST` (OpnameUpdate created, card status set, stock decremented)
-- New body fields: `picName`, `note`
+- Scanned `OK` → `VERIFIED`; scanned `BROKEN` → `BROKEN`; scanned `LOST` → `LOST`
+- Unscanned `OPNAME` cards are auto-marked `LOST` with stock decremented
 
 ### `PUT /api/opname/:id` (cancel) — full rollback
-- When status is set to `CANCELLED`, all `OPNAME` cards and all scanned `BROKEN`/`LOST` cards at the checkpoint are restored to `VERIFIED`
-- Stock is incremented back for every `BROKEN`/`LOST` scan that had already decremented it
-
-### `GET /api/opname` — corrected `initialCount`
-- `stats.initialCount` now uses `opname.amount` (the COUNT taken at session start) — accurate for both `ONGOING` and `COMPLETED` opnames regardless of current card statuses
-- New query params: `startDate` / `endDate`
-
-### `GET /api/opname/:id` — corrected `initialCount` and `items` scope
-- `stats.initialCount` = `opname.amount`; added `finalCount = initialCount - totalBroken - totalLost`
-- `items` scoped to cards with `OPNAME` status (unscanned) OR an `OpnameUpdate` entry (scanned) — excludes cards validated after the session started
-- `items[].verifiedCondition` is `null` for unscanned cards
+- All `OPNAME` and already-scanned `BROKEN`/`LOST` cards restored to `VERIFIED`
+- Stock restored for every `BROKEN`/`LOST` scan
 
 ### `GET /api/stock/dashboard` — top sales stats
 - `topHighestSaleByCheckpoint` — top 10 STORE checkpoints by total SIM card sales
-- `topHighestSaleByUser` — top 10 users by total SIM card sales across scoped checkpoints
+- `topHighestSaleByUser` — top 10 users by total SIM card sales
 
 ---
 
 ## Stack
 
-- **Runtime**: Node.js + TypeScript
-- **Framework**: Express
-- **ORM**: Prisma (PostgreSQL)
-- **Auth**: JWT via HTTP-only cookies (access token 15 min, refresh token 7 days)
+| | |
+|---|---|
+| **Runtime** | Node.js + TypeScript |
+| **Framework** | Express |
+| **ORM** | Prisma 7 (SQL Server default, PostgreSQL supported) |
+| **Auth** | JWT via HTTP-only cookies (access 15 min, refresh 7 days, session-bound) |
+| **Default port** | 3000 |
 
 ## Getting Started
 
 ```bash
 pnpm install
+npx prisma generate
 pnpm run dev
 ```
 
-Copy `.env.example` to `.env` and set `DATABASE_URL` and `PORT`.
+Copy `.env.example` to `.env`. Required variables:
+
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | SQL Server: `sqlserver://HOST:PORT;database=DB;user=U;password=P;encrypt=true;trustServerCertificate=true` |
+| `DATABASE_PROVIDER` | `sqlserver` (default) or `postgresql` |
+| `PORT` | API port, default `3000` |
+| `JWT_SECRET` | Secret for signing tokens |
+| `COOKIE_SECRET` | Secret for signed cookies (production) |
+| `NODE_ENV` | `development` or `production` |
 
 ---
 
 ## Authentication
 
-All routes except `/api/user/auth/*` require a valid `access_token` cookie. Tokens are set automatically on sign-in and refreshed via the refresh-token endpoint.
+All routes except `/api/user/auth/*` require a valid `access_token` cookie. Tokens are set automatically on sign-in and refreshed via the refresh-token endpoint. **Sign-out immediately invalidates the access token** — the session ID embedded in the token is deleted from the database.
 
 ---
 
@@ -102,7 +139,7 @@ Base URL: `/api`
     "userName": "John Doe",
     "userImageURL": null,
     "userCode": "USR001",
-    "accesses": [{ "code": "ACCESS_CODE", "name": "Access Name" }]
+    "accesses": [{ "code": "1001", "name": "Dashboard" }]
   }
 }
 ```
@@ -123,7 +160,7 @@ Reads `refresh_token` cookie, rotates both tokens.
 
 ### `POST /api/user/auth/sign-out`
 
-Clears both cookies and invalidates the server session.
+Clears both cookies and deletes the server session, immediately invalidating the access token.
 
 **Response** `200`
 ```json
@@ -138,21 +175,40 @@ Clears both cookies and invalidates the server session.
 
 ### `GET /api/stock/dashboard`
 
-Returns aggregated stock overview for the user's circle.
+Returns aggregated stock overview for the user's circle, scoped to all data up to the end of the requested month/year.
+
+**Query params**
+
+| Param | Type | Description |
+|---|---|---|
+| `year` | number | Default: current year |
+| `month` | number | Default: current month. Cutoff = today if current period, otherwise last day of month |
+| `dcCode` | string | Scope DC totals/monthly data to a specific DC checkpoint |
+| `storeCode` | string | Scope Store totals/monthly data to a specific store checkpoint |
 
 **Response** `200`
 ```json
 {
   "message": "Dashboard synced successfully",
   "data": {
+    "year": 2026,
+    "month": 5,
+    "cutoff": "2026-05-25T23:59:59.999Z",
     "initialStock": 5000,
     "finalStock": 3200,
     "distributedToDC": 1200,
     "distributedToStore": 800,
-    "topLeastStoreStock": [...],
-    "topMostDCStock": [...],
+    "distributedToDCByMonth": [
+      { "month": 1, "amount": 100 },
+      { "month": 2, "amount": 150 },
+      "...",
+      { "month": 12, "amount": 0 }
+    ],
+    "distributedToStoreByMonth": ["...same 12-element structure"],
+    "topLeastStoreStock": ["...top 10 stores with least stock"],
+    "topMostDCStock": ["...top 10 DCs with most stock"],
     "topHighestSaleByCheckpoint": [
-      { "checkpoint": { "code": "STORE001", "name": "Store A", "type": "STORE" }, "totalSales": 320 }
+      { "checkpoint": { "code": "ST01", "name": "Store A", "type": "STORE" }, "totalSales": 320 }
     ],
     "topHighestSaleByUser": [
       { "user": { "code": "USR001", "name": "John Doe" }, "totalSales": 150 }
@@ -163,8 +219,80 @@ Returns aggregated stock overview for the user's circle.
 
 | Field | Description |
 |---|---|
-| `topHighestSaleByCheckpoint` | Top 10 STORE checkpoints ranked by total SIMCARD sales (merges), descending |
-| `topHighestSaleByUser` | Top 10 users ranked by total SIMCARD sales across all scoped checkpoints, descending |
+| `cutoff` | Actual date all data is filtered up to |
+| `distributedToDC` / `distributedToStore` | Cumulative totals from the beginning up to `cutoff` |
+| `distributedToDCByMonth` / `distributedToStoreByMonth` | Monthly breakdown for the selected year; months after `cutoff` are `0` |
+| `topHighestSaleByCheckpoint` | Top 10 STORE checkpoints by total SIM card sales up to `cutoff` |
+| `topHighestSaleByUser` | Top 10 users by total SIM card sales up to `cutoff` |
+
+---
+
+### `GET /api/stock/dashboard/dc-distribution`
+
+Monthly DC distribution bar chart data with dropdown support. Returns the list of accessible DC checkpoints (for the dropdown) and 12 monthly totals.
+
+**Query params**
+
+| Param | Type | Description |
+|---|---|---|
+| `year` | number | Default: current year |
+| `month` | number | Default: current month (cutoff logic same as dashboard) |
+| `checkpointCode` | string | Filter to a specific DC checkpoint. Omit for all DCs combined |
+
+**Response** `200`
+```json
+{
+  "message": "DC distribution chart retrieved successfully",
+  "data": {
+    "year": 2026,
+    "month": 5,
+    "cutoff": "2026-05-25T23:59:59.999Z",
+    "checkpoints": [
+      { "code": "DC01", "name": "Distribution Center 01" }
+    ],
+    "chart": [
+      { "month": 1, "amount": 200 },
+      { "month": 2, "amount": 350 },
+      "...",
+      { "month": 12, "amount": 0 }
+    ]
+  }
+}
+```
+
+---
+
+### `GET /api/stock/dashboard/store-distribution`
+
+Monthly store distribution bar chart data. Omit `checkpointCode` for "Seluruh Toko" (all stores combined).
+
+**Query params**
+
+| Param | Type | Description |
+|---|---|---|
+| `year` | number | Default: current year |
+| `month` | number | Default: current month (cutoff logic same as dashboard) |
+| `checkpointCode` | string | Filter to a specific store. Omit for all stores combined |
+
+**Response** `200`
+```json
+{
+  "message": "Store distribution chart retrieved successfully",
+  "data": {
+    "year": 2026,
+    "month": 5,
+    "cutoff": "2026-05-25T23:59:59.999Z",
+    "checkpoints": [
+      { "code": "ST01", "name": "Store 01" }
+    ],
+    "chart": [
+      { "month": 1, "amount": 80 },
+      "...",
+      { "month": 12, "amount": 0 }
+    ]
+  }
+}
+```
 
 ---
 
@@ -195,7 +323,7 @@ Returns aggregated stock overview for the user's circle.
 
 Marks remaining UNVERIFIED cards as LOST and closes the batch.
 
-**Body**
+**Body** *(optional)*
 ```json
 { "note": "Optional closing note" }
 ```
@@ -206,7 +334,7 @@ Marks remaining UNVERIFIED cards as LOST and closes the batch.
 
 #### `DELETE /api/stock/batches/:id`
 
-Deletes a batch and all its cards/numbers. Only allowed on `ONGOING` batches with no `SOLD` or `HOLD` cards.
+Deletes a batch and all its cards/numbers. Only allowed on `ONGOING` batches with no `SOLD` or `DELIVERY` cards.
 
 **Response** `200` — `{ message: "Batch deleted successfully" }`
 
@@ -223,7 +351,7 @@ Deletes a batch and all its cards/numbers. Only allowed on `ONGOING` batches wit
 | `page` | number | Default `1` |
 | `limit` | number | Default `10` |
 | `checkpointCode` | string | Filter by checkpoint |
-| `status` | `VERIFIED \| SOLD \| BROKEN \| LOST \| HOLD \| UNVERIFIED` | Filter by status |
+| `status` | `VERIFIED \| SOLD \| BROKEN \| LOST \| DELIVERY \| OPNAME \| UNVERIFIED` | Filter by status |
 | `search` | string | Search by key or name |
 | `uploadAt` | `YYYY-MM-DD` | Filter by upload date |
 | `batch` | string | Filter by batch code |
@@ -241,7 +369,7 @@ Deletes a batch and all its cards/numbers. Only allowed on `ONGOING` batches wit
 
 #### `DELETE /api/stock/cards/:key`
 
-Not allowed on `SOLD` or `HOLD` cards.
+Not allowed on `SOLD` or `DELIVERY` cards.
 
 **Response** `200` — `{ message: "Card deleted successfully" }`
 
@@ -249,7 +377,7 @@ Not allowed on `SOLD` or `HOLD` cards.
 
 #### `POST /api/stock/cards/validate/:key`
 
-Validates or marks a card. Adjusts `CardStock` automatically.
+Validates a card. Only `UNVERIFIED` cards can be validated — returns `409` if already validated.
 
 **Body**
 ```json
@@ -391,12 +519,13 @@ Merge multiple SIMs in one request.
 
 ### `POST /api/opname`
 
-Creates a new opname session for a checkpoint. Only one `ONGOING` opname is allowed per checkpoint at a time.
+Creates a new opname session. `checkpointCode` is required (returns `400` if missing). Only one `ONGOING` opname is allowed per checkpoint at a time.
 
 **Body**
 ```json
-{ "checkpointCode": "STORE001" }
+{ "checkpointCode": "STORE001", "type": "ICCID" }
 ```
+`type`: `ICCID` (default) | `MSISDN`
 
 **Response** `201` — `{ data: { opname } }`
 
@@ -440,15 +569,6 @@ Creates a new opname session for a checkpoint. Only one `ONGOING` opname is allo
 }
 ```
 
-| Field | Description |
-|---|---|
-| `checkpoint.name` | Name of the checkpoint this opname belongs to |
-| `stats.initialCount` | Total cards expected at opname start |
-| `stats.totalGood` | Cards scanned as `OK` |
-| `stats.totalBroken` | Cards scanned as `BROKEN` |
-| `stats.totalLost` | Cards scanned as `LOST` (includes auto-marked on close) |
-| `stats.finalCount` | `initialCount - totalBroken - totalLost` |
-
 ---
 
 ### `GET /api/opname/:id`
@@ -461,11 +581,12 @@ Creates a new opname session for a checkpoint. Only one `ONGOING` opname is allo
       "id": 1,
       "status": "COMPLETED",
       "stats": {
-        "totalICCID": 100,
+        "initialCount": 100,
         "totalScanned": 100,
         "totalGood": 90,
         "totalBroken": 5,
-        "totalLost": 5
+        "totalLost": 5,
+        "finalCount": 90
       },
       "items": [
         {
@@ -492,20 +613,18 @@ Creates a new opname session for a checkpoint. Only one `ONGOING` opname is allo
 
 | Field | Description |
 |---|---|
-| `stats.totalICCID` | Total cards expected (= `amount`) |
+| `stats.initialCount` | Total cards expected at opname start |
 | `stats.totalScanned` | Total cards with an opname update entry |
 | `stats.totalGood / totalBroken / totalLost` | Breakdown by condition |
-| `items[].iccid` | The card's ICCID / MSISDN key |
-| `items[].initialCondition` | Card's system status before opname |
-| `items[].verifiedCondition` | Condition recorded during opname (`OK \| BROKEN \| LOST`) |
-| `items[].scannedAt` | When the update was recorded |
+| `stats.finalCount` | `initialCount - totalBroken - totalLost` |
+| `items[].verifiedCondition` | Condition recorded during opname (`OK \| BROKEN \| LOST`), `null` if not yet scanned |
 | `closingReport` | Submittance data recorded when the opname was closed |
 
 ---
 
 ### `PATCH /api/opname/:id`
 
-Scan a card during an opname session. Records the physical condition and adjusts `CardStock` if the physical state differs from the system state.
+Scan a card during an opname session.
 
 **Body**
 ```json
@@ -513,9 +632,7 @@ Scan a card during an opname session. Records the physical condition and adjusts
 ```
 `status`: `OK` | `BROKEN` | `LOST`
 
-Stock adjustment rules:
-- Card is `VERIFIED` in system but scanned as `BROKEN`/`LOST` → stock decremented
-- Card is not `VERIFIED` in system but scanned as `OK` → stock incremented
+Stock adjustment: `BROKEN`/`LOST` decrements `CardStock`; `OK` leaves stock unchanged.
 
 **Response** `200` — `{ data: { opname } }`
 
@@ -523,49 +640,32 @@ Stock adjustment rules:
 
 ### `PATCH /api/opname/:id/close`
 
-Closes the opname. Any `VERIFIED` cards at the checkpoint that were **not scanned** are automatically marked `LOST` (both in the opname record and their actual card status), and stock is decremented accordingly.
+Closes the opname. Unscanned `OPNAME` cards are auto-marked `LOST` and stock decremented.
 
-Accepts file uploads via `multipart/form-data`.
-
-**Form fields**
+**Form fields** *(all optional)*
 
 | Field | Type | Description |
 |---|---|---|
-| `signFile` | image | Operator signature (max 5 MB) |
-| `picSignFile` | image | PIC signature (max 5 MB) |
-| `documentationFile` | image | Documentation photos, up to 2 files |
+| `signURL` | string | Operator signature URL |
+| `picSignURL` | string | PIC signature URL |
+| `documentationURL` | string or array | Up to 2 documentation URLs |
 | `picName` | string | Name of the PIC who signed |
-| `note` | string | Description / closing notes |
+| `note` | string | Closing notes |
 
-**Response** `200`
-```json
-{
-  "data": {
-    "opname": { "id": 1, "status": "COMPLETED", "progress": 100 },
-    "submittance": {
-      "id": 1,
-      "signURL": "/uploads/sign.jpg",
-      "picSignURL": "/uploads/pic.jpg",
-      "picName": "John Doe",
-      "documentationURL": "/uploads/doc1.jpg",
-      "note": "Closing notes here.",
-      "documentations": [{ "id": 1, "url": "/uploads/doc1.jpg" }]
-    }
-  }
-}
-```
+**Response** `200` — `{ data: { opname, submittance } }`
 
 ---
 
 ### `PUT /api/opname/:id`
 
-Manually update opname status.
+Manually update opname status. Only `CANCELLED` is accepted — use the close endpoint to complete.
 
 **Body**
 ```json
 { "status": "CANCELLED" }
 ```
-`status`: `ONGOING` | `COMPLETED` | `CANCELLED`
+
+Cancelling restores all `OPNAME` cards and scanned `BROKEN`/`LOST` cards to `VERIFIED`, and restores stock.
 
 **Response** `200` — `{ data: { opname } }`
 
@@ -583,7 +683,7 @@ Manually update opname status.
 
 ### `POST /api/distribution`
 
-Creates one distribution per source checkpoint represented in the card selection. Cards are set to `HOLD` immediately.
+Creates one distribution per source checkpoint represented in the card selection. Cards are set to `DELIVERY` immediately.
 
 **Body**
 ```json
@@ -598,8 +698,8 @@ Creates one distribution per source checkpoint represented in the card selection
 ```json
 {
   "data": {
-    "distributions": [...],
-    "cards": [...],
+    "distributions": ["..."],
+    "cards": ["..."],
     "missingKeys": ["ICCID999"]
   }
 }
@@ -617,12 +717,12 @@ Creates one distribution per source checkpoint represented in the card selection
 | `page` | number | Default `1` |
 | `limit` | number | Default `10` |
 | `status` | `SCHEDULED \| HOLD \| DELIVERED \| CANCELLED` | Filter by status |
-| `sourceCode` | string | Filter by source checkpoint. When combined with `targetCode`, both must match (AND, not OR) |
-| `targetCode` | string | Filter by target checkpoint. When combined with `sourceCode`, both must match (AND, not OR) |
+| `sourceCode` | string | Filter by source checkpoint |
+| `targetCode` | string | Filter by target checkpoint |
 | `startDueDate` | ISO date | Scheduled-at range start |
 | `endDueDate` | ISO date | Scheduled-at range end |
 
-Results are scoped to distributions where the authenticated user's circle owns at least one end (source or target).
+Results are scoped to distributions where the user's circle owns at least one end (source or target).
 
 **Response** `200` — `{ data: { distributions }, pagination }` with `source`, `target`, `items` (first 5), and `_count`.
 
@@ -636,7 +736,7 @@ Results are scoped to distributions where the authenticated user's circle owns a
 
 ### `PUT /api/distribution/:id`
 
-Update status or reschedule. Cannot set `DELIVERED` (use the submit endpoint) or `CANCELLED` (use the cancel endpoint).
+Update status or reschedule. Cannot set `DELIVERED` or `CANCELLED` through this endpoint.
 
 **Body**
 ```json
@@ -650,7 +750,7 @@ Update status or reschedule. Cannot set `DELIVERED` (use the submit endpoint) or
 
 ### `PUT /api/distribution/cancel/:id`
 
-Cancels the distribution and restores all HOLD cards back to `VERIFIED`.
+Cancels the distribution and restores all `DELIVERY` cards back to `VERIFIED`.
 
 **Response** `200` — `{ data: { distribution } }`
 
@@ -658,7 +758,7 @@ Cancels the distribution and restores all HOLD cards back to `VERIFIED`.
 
 ### `PUT /api/distribution/submit/:id`
 
-Marks the distribution as `DELIVERED`. Transfers cards to the target checkpoint, adjusts stock on both ends, and records delivery proof.
+Marks the distribution as `DELIVERED`. Transfers cards to the target checkpoint and adjusts stock on both ends.
 
 **Form fields** *(all optional)*
 
@@ -679,7 +779,7 @@ Marks the distribution as `DELIVERED`. Transfers cards to the target checkpoint,
 
 ### `DELETE /api/distribution/:id`
 
-Deletes the distribution, restores HOLD cards to `VERIFIED`. Not allowed on `DELIVERED` distributions.
+Deletes the distribution and restores `DELIVERY` cards to `VERIFIED`. Not allowed on `DELIVERED` distributions.
 
 **Response** `200` — `{ message: "Distribution deleted successfully" }`
 
@@ -687,9 +787,11 @@ Deletes the distribution, restores HOLD cards to `VERIFIED`. Not allowed on `DEL
 
 ## Checkpoint
 
-> Auth required.
+> Auth required. Checkpoints are scoped to the authenticated user's circle via `CheckpointCircle` — only checkpoints linked to the user's circle are visible.
 
 ### `POST /api/checkpoint`
+
+Creates the checkpoint and automatically links it to the creator's circle.
 
 **Body**
 ```json
@@ -697,13 +799,13 @@ Deletes the distribution, restores HOLD cards to `VERIFIED`. Not allowed on `DEL
 ```
 `type`: `DC` | `STORE` | `HQ`
 
-Creates the checkpoint and automatically links it to the creator's circle.
-
 **Response** `201` — `{ data: { checkpoint } }`
 
 ---
 
 ### `GET /api/checkpoint`
+
+Results are ordered by `id ASC` for deterministic ordering.
 
 **Query params**
 
@@ -716,7 +818,7 @@ Creates the checkpoint and automatically links it to the creator's circle.
 | `startSoldAt` | `YYYY-MM-DD` | Filter merge count from date |
 | `endSoldAt` | `YYYY-MM-DD` | Filter merge count to date |
 
-**Response** `200` — `{ data: { checkpoints }, pagination? }` with `_count.cards` and `_count.merges`. Pagination only included when `limit` is provided.
+**Response** `200` — `{ data: { checkpoints }, pagination? }` with `_count.cards` and `_count.merges`.
 
 ---
 
