@@ -9,19 +9,38 @@ class StockController {
   static async dashboardSync (req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
+      const year = Number(req.query.year) || new Date().getFullYear();
+      const dcCode = req.query.dcCode as string | undefined;
+      const storeCode = req.query.storeCode as string | undefined;
+
+      const yearStart = new Date(year, 0, 1);
+      const yearEnd   = new Date(year, 11, 31, 23, 59, 59, 999);
+
       const scopeFilter = {
         status: 'DELIVERED' as const,
         OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }]
       };
 
-      const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards, topSaleByUser] = await Promise.all([
-        // 1. Cards distributed TO DC checkpoints
+      const dcMonthlyWhere = {
+        ...scopeFilter,
+        target: { type: 'DC', ...(dcCode && { code: dcCode }) },
+        createdAt: { gte: yearStart, lte: yearEnd }
+      };
+
+      const storeMonthlyWhere = {
+        ...scopeFilter,
+        target: { type: 'STORE', ...(storeCode && { code: storeCode }) },
+        createdAt: { gte: yearStart, lte: yearEnd }
+      };
+
+      const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards, topSaleByUser, dcMonthlyRows, storeMonthlyRows] = await Promise.all([
+        // 1. Cards distributed TO DC checkpoints (all-time total)
         prisma.distribution.aggregate({
           _sum: { amount: true },
           where: { ...scopeFilter, target: { type: 'DC' } }
         }),
 
-        // 2. Cards distributed TO STORE checkpoints
+        // 2. Cards distributed TO STORE checkpoints (all-time total)
         prisma.distribution.aggregate({
           _sum: { amount: true },
           where: { ...scopeFilter, target: { type: 'STORE' } }
@@ -51,6 +70,18 @@ class StockController {
           _count: { userCode: true },
           orderBy: { _count: { userCode: 'desc' } },
           take: 10
+        }),
+
+        // Monthly DC distributions for selected year
+        prisma.distribution.findMany({
+          where: dcMonthlyWhere,
+          select: { amount: true, createdAt: true }
+        }),
+
+        // Monthly STORE distributions for selected year
+        prisma.distribution.findMany({
+          where: storeMonthlyWhere,
+          select: { amount: true, createdAt: true }
         })
       ]);
 
@@ -128,13 +159,28 @@ class StockController {
         totalSales: row._count.userCode
       }));
 
+      // Build 12-element monthly arrays (index 0 = January … 11 = December)
+      const buildMonthlyTotals = (rows: { amount: number; createdAt: Date }[]) => {
+        const months = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
+        for (const row of rows) {
+          months[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+        }
+        return months;
+      };
+
+      const distributedToDCByMonth    = buildMonthlyTotals(dcMonthlyRows);
+      const distributedToStoreByMonth = buildMonthlyTotals(storeMonthlyRows);
+
       res.status(200).json({
         message: 'Dashboard synced successfully',
         data: {
+          year,
           initialStock,
           finalStock,
           distributedToDC: dcAggregate._sum.amount ?? 0,
           distributedToStore: storeAggregate._sum.amount ?? 0,
+          distributedToDCByMonth,
+          distributedToStoreByMonth,
           topLeastStoreStock,
           topMostDCStock,
           topHighestSaleByCheckpoint,
