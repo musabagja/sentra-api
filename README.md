@@ -33,8 +33,8 @@ REST API for managing SIM card stock, opname (stock-taking), and distribution ac
 - Response includes `distributedToDCByMonth` and `distributedToStoreByMonth` — 12-element arrays covering January through December; months after the cutoff are `0`
 
 ### New dashboard chart endpoints
-- `GET /api/stock/dashboard/dc-distribution` — monthly DC distribution chart with checkpoint dropdown support
-- `GET /api/stock/dashboard/store-distribution` — monthly store distribution chart with checkpoint dropdown support
+- `GET /api/stock/dashboard/dc-distribution` — monthly DC distribution chart; filter by `year` only (cutoff = today or Dec 31)
+- `GET /api/stock/dashboard/store-distribution` — monthly store distribution chart; filter by `year` only (cutoff = today or Dec 31)
 
 ---
 
@@ -229,14 +229,13 @@ Returns aggregated stock overview for the user's circle, scoped to all data up t
 
 ### `GET /api/stock/dashboard/dc-distribution`
 
-Monthly DC distribution bar chart data with dropdown support. Returns the list of accessible DC checkpoints (for the dropdown) and 12 monthly totals.
+Monthly DC distribution bar chart data with dropdown support. Returns the list of accessible DC checkpoints (for the dropdown) and 12 monthly totals for the selected year.
 
 **Query params**
 
 | Param | Type | Description |
 |---|---|---|
-| `year` | number | Default: current year |
-| `month` | number | Default: current month (cutoff logic same as dashboard) |
+| `year` | number | Default: current year. Cutoff = today if current year, otherwise Dec 31 of that year |
 | `checkpointCode` | string | Filter to a specific DC checkpoint. Omit for all DCs combined |
 
 **Response** `200`
@@ -245,7 +244,6 @@ Monthly DC distribution bar chart data with dropdown support. Returns the list o
   "message": "DC distribution chart retrieved successfully",
   "data": {
     "year": 2026,
-    "month": 5,
     "cutoff": "2026-05-25T23:59:59.999Z",
     "checkpoints": [
       { "code": "DC01", "name": "Distribution Center 01" }
@@ -270,8 +268,7 @@ Monthly store distribution bar chart data. Omit `checkpointCode` for "Seluruh To
 
 | Param | Type | Description |
 |---|---|---|
-| `year` | number | Default: current year |
-| `month` | number | Default: current month (cutoff logic same as dashboard) |
+| `year` | number | Default: current year. Cutoff = today if current year, otherwise Dec 31 of that year |
 | `checkpointCode` | string | Filter to a specific store. Omit for all stores combined |
 
 **Response** `200`
@@ -280,7 +277,6 @@ Monthly store distribution bar chart data. Omit `checkpointCode` for "Seluruh To
   "message": "Store distribution chart retrieved successfully",
   "data": {
     "year": 2026,
-    "month": 5,
     "cutoff": "2026-05-25T23:59:59.999Z",
     "checkpoints": [
       { "code": "ST01", "name": "Store 01" }

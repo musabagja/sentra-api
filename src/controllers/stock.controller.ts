@@ -219,16 +219,13 @@ class StockController {
       const allowed = req.checkpointCodes ?? [];
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
-      const now          = new Date();
-      const currentYear  = now.getFullYear();
-      const currentMonth = now.getMonth() + 1;
-      const year  = Number(req.query.year)  || currentYear;
-      const month = Number(req.query.month) || currentMonth;
+      const now         = new Date();
+      const currentYear = now.getFullYear();
+      const year        = Number(req.query.year) || currentYear;
 
-      const isCurrentPeriod = year === currentYear && month === currentMonth;
-      const cutoff = isCurrentPeriod
+      const cutoff = year === currentYear
         ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-        : new Date(year, month, 0, 23, 59, 59, 999);
+        : new Date(year, 11, 31, 23, 59, 59, 999);
 
       const yearStart = new Date(year, 0, 1);
 
@@ -262,7 +259,7 @@ class StockController {
 
       res.status(200).json({
         message: 'DC distribution chart retrieved successfully',
-        data: { year, month, cutoff, checkpoints: dcCheckpoints, chart }
+        data: { year, cutoff, checkpoints: dcCheckpoints, chart }
       });
     } catch (error) {
       next(error);
@@ -274,16 +271,13 @@ class StockController {
       const allowed = req.checkpointCodes ?? [];
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
-      const now          = new Date();
-      const currentYear  = now.getFullYear();
-      const currentMonth = now.getMonth() + 1;
-      const year  = Number(req.query.year)  || currentYear;
-      const month = Number(req.query.month) || currentMonth;
+      const now         = new Date();
+      const currentYear = now.getFullYear();
+      const year        = Number(req.query.year) || currentYear;
 
-      const isCurrentPeriod = year === currentYear && month === currentMonth;
-      const cutoff = isCurrentPeriod
+      const cutoff = year === currentYear
         ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-        : new Date(year, month, 0, 23, 59, 59, 999);
+        : new Date(year, 11, 31, 23, 59, 59, 999);
 
       const yearStart = new Date(year, 0, 1);
 
@@ -317,7 +311,7 @@ class StockController {
 
       res.status(200).json({
         message: 'Store distribution chart retrieved successfully',
-        data: { year, month, cutoff, checkpoints: storeCheckpoints, chart }
+        data: { year, cutoff, checkpoints: storeCheckpoints, chart }
       });
     } catch (error) {
       next(error);
