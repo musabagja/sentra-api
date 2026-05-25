@@ -183,7 +183,7 @@ class StockController {
       const buildMonthlyTotals = (rows: { amount: number; createdAt: Date }[]) => {
         const months = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
         for (const row of rows) {
-          months[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+          months[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
         }
         return months;
       };
@@ -254,7 +254,7 @@ class StockController {
 
       const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
       for (const row of rows) {
-        chart[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+        chart[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
       }
 
       res.status(200).json({
@@ -306,7 +306,7 @@ class StockController {
 
       const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
       for (const row of rows) {
-        chart[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+        chart[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
       }
 
       res.status(200).json({
@@ -663,7 +663,7 @@ class StockController {
 
   static async deleteCard(req: Request, res: Response, next: NextFunction) {
     try {
-      const { key } = req.params;
+      const key = String(req.params.key);
       const allowed = req.checkpointCodes ?? [];
 
       const existing = await prisma.card.findUnique({ where: { key } });

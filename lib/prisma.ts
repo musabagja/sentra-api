@@ -8,7 +8,9 @@ const url = process.env.DATABASE_URL!;
 // sqlserver://HOST:PORT;database=DB;user=U;password=P;encrypt=true;...
 function parseMssqlUrl(rawUrl: string) {
   const withoutScheme = rawUrl.replace(/^sqlserver:\/\//, "");
-  const [hostPort, ...parts] = withoutScheme.split(";");
+  const segments = withoutScheme.split(";");
+  const hostPort = segments[0] ?? "";
+  const parts = segments.slice(1);
   const colonIdx = hostPort.lastIndexOf(":");
   const server = colonIdx > 0 ? hostPort.slice(0, colonIdx) : hostPort;
   const port = colonIdx > 0 ? parseInt(hostPort.slice(colonIdx + 1)) : 1433;
@@ -22,11 +24,11 @@ function parseMssqlUrl(rawUrl: string) {
   }
 
   return {
-    server,
+    server: server || "",
     port,
-    database: params["database"] ?? params["initial catalog"],
-    user: params["user"] ?? params["user id"],
-    password: params["password"],
+    database: params["database"] ?? params["initial catalog"] ?? "",
+    user: params["user"] ?? params["user id"] ?? "",
+    password: params["password"] ?? "",
     options: {
       encrypt: params["encrypt"] !== "false",
       trustServerCertificate: params["trustservercertificate"] === "true",

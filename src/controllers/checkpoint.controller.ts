@@ -60,8 +60,8 @@ class CheckpointController {
 
       if (search) {
         where.OR = [
-          { code: { contains: search as string, mode: 'insensitive' } },
-          { name: { contains: search as string, mode: 'insensitive' } }
+          { code: { contains: search as string } },
+          { name: { contains: search as string } }
         ];
       }
 
