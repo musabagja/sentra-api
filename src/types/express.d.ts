@@ -4,7 +4,7 @@ interface User {
   id: number;
   code: string;
   name: string;
-  phone: string;
+  phone: string | null;
   password: string | null;
   imageURL: string | null;
   status: string;
