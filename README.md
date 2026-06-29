@@ -79,11 +79,42 @@ REST API for managing SIM card stock, opname (stock-taking), and distribution ac
 
 ## Getting Started
 
+> **Requires pnpm 10+** (`pnpm --version`). Install/upgrade with `npm i -g pnpm`.
+
+```bash
+pnpm install          # build scripts (bcrypt, prisma) run automatically — see note below
+npx prisma generate
+pnpm run dev          # development
+```
+
+### Production deploy
+
 ```bash
 pnpm install
 npx prisma generate
-pnpm run dev
+npx prisma migrate deploy   # apply DB migrations
+pnpm run build              # compile TypeScript -> dist/
+pnpm start                  # node dist/server.js
 ```
+
+### ⚠️ `ERR_PNPM_IGNORED_BUILDS` on install
+
+If you see `Ignored build scripts: @prisma/engines, bcrypt, esbuild, prisma, protobufjs`,
+the dependency build scripts did **not** run — the app will crash at runtime because
+`bcrypt`'s native binary and the Prisma query engine are missing.
+
+This repo allowlists those packages in **`pnpm-workspace.yaml`** (the location pnpm 10
+reads), so a fresh `pnpm install` runs them with no prompt. If the warning still appears
+on a stale server checkout:
+
+```bash
+git pull                 # make sure pnpm-workspace.yaml is present
+pnpm approve-builds      # approve the listed packages, then reinstall
+pnpm install
+```
+
+The deprecated-`supertest` warnings are harmless — it is a test-only dependency and is
+not used in production.
 
 Copy `.env.example` to `.env`. Required variables:
 

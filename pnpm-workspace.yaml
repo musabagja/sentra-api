@@ -1,0 +1,9 @@
+# pnpm 10 reads the build-script allowlist from here (not from package.json).
+# Without this, pnpm refuses to run native/postinstall build scripts and the
+# deploy fails at runtime (bcrypt native binding + Prisma query engine missing).
+onlyBuiltDependencies:
+  - '@prisma/engines'
+  - prisma
+  - bcrypt
+  - esbuild
+  - protobufjs
