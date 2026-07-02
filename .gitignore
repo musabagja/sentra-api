@@ -65,3 +65,4 @@ typings/
 /generated/prisma
 
 .seed
+prisma/seed.ts
