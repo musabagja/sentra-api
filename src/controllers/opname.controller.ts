@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import prisma from "../../lib/prisma";
 
-import { hasCheckpointAccess, resolveCheckpointFilter } from "../utils/access.util";
+import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from "../utils/access.util";
 
 class OpnameController {
   static async updateOpnameProgress(req: Request, res: Response, next: NextFunction) {
@@ -375,10 +375,10 @@ class OpnameController {
   static async getOpnames(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, type, startDate, endDate } = req.query;
-      const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
 
       const where: any = {
-        checkpointCode: { in: resolveCheckpointFilter(checkpointCode as string | undefined, allowed) }
+        checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined)
       };
       if (type) where.type = type;
       if (startDate || endDate) {

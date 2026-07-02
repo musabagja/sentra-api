@@ -2,13 +2,14 @@ import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
 import * as xlsx from 'xlsx';
 
-import { hasCheckpointAccess, resolveCheckpointFilter } from '../utils/access.util';
+import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from '../utils/access.util';
 
 class StockController {
 
   static async dashboardSync (req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
       const dcCode    = req.query.dcCode    as string | undefined;
       const storeCode = req.query.storeCode as string | undefined;
 
@@ -29,7 +30,7 @@ class StockController {
 
       const scopeFilter = {
         status: 'DELIVERED' as const,
-        OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }],
+        OR: [{ source: checkpointInCircle(circleCode) }, { target: checkpointInCircle(circleCode) }],
         createdAt: { lte: cutoff }
       };
 
@@ -60,7 +61,7 @@ class StockController {
 
         // Shared checkpoint fetch — latest stock snapshot up to cutoff
         prisma.checkpoint.findMany({
-          where: { code: { in: allowed } },
+          where: checkpointInCircle(circleCode),
           include: {
             cardStock: {
               where: { createdAt: { lte: cutoff } },
@@ -73,7 +74,7 @@ class StockController {
         // Base initial stock: active cards created up to cutoff
         prisma.card.count({
           where: {
-            checkpointCode: { in: allowed },
+            checkpoint: checkpointInCircle(circleCode),
             status: { in: ['VERIFIED', 'SOLD', 'DELIVERY', 'OPNAME'] },
             createdAt: { lte: cutoff }
           }
@@ -82,7 +83,7 @@ class StockController {
         // BROKEN/LOST candidates — need to check if opname-traced
         prisma.card.findMany({
           where: {
-            checkpointCode: { in: allowed },
+            checkpoint: checkpointInCircle(circleCode),
             status: { in: ['BROKEN', 'LOST'] },
             createdAt: { lte: cutoff }
           },
@@ -92,7 +93,7 @@ class StockController {
         // Top 10 users by total sales (merges) up to cutoff
         prisma.merge.groupBy({
           by: ['userCode'],
-          where: { checkpointCode: { in: allowed }, createdAt: { lte: cutoff } },
+          where: { checkpoint: checkpointInCircle(circleCode), createdAt: { lte: cutoff } },
           _count: { userCode: true },
           orderBy: { _count: { userCode: 'desc' } },
           take: 10
@@ -111,10 +112,6 @@ class StockController {
         })
       ]);
 
-      const storeCheckpointCodes = allCheckpoints
-        .filter(c => c.type === 'STORE')
-        .map(c => c.code);
-
       // Cards that are BROKEN/LOST but discovered via opname still count toward initial stock.
       const brokenLostIds = brokenLostCards.map(c => c.id);
       const [opnamedBrokenLostCount, topSaleByCheckpoint] = await Promise.all([
@@ -128,7 +125,7 @@ class StockController {
         // Top 10 STORE checkpoints by total sales (merges) up to cutoff
         prisma.merge.groupBy({
           by: ['checkpointCode'],
-          where: { checkpointCode: { in: storeCheckpointCodes }, createdAt: { lte: cutoff } },
+          where: { checkpoint: { type: 'STORE', ...checkpointInCircle(circleCode) }, createdAt: { lte: cutoff } },
           _count: { checkpointCode: true },
           orderBy: { _count: { checkpointCode: 'desc' } },
           take: 10
@@ -217,6 +214,7 @@ class StockController {
   static async getDCDistributionChart(req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
       const now         = new Date();
@@ -237,14 +235,14 @@ class StockController {
 
       const [dcCheckpoints, rows] = await Promise.all([
         prisma.checkpoint.findMany({
-          where: { code: { in: allowed }, type: 'DC' },
+          where: { ...checkpointInCircle(circleCode), type: 'DC' },
           select: { code: true, name: true },
           orderBy: { name: 'asc' }
         }),
         prisma.distribution.findMany({
           where: {
             status: 'DELIVERED',
-            OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }],
+            OR: [{ source: checkpointInCircle(circleCode) }, { target: checkpointInCircle(circleCode) }],
             target: { type: 'DC', ...(checkpointCode && { code: checkpointCode }) },
             createdAt: { gte: yearStart, lte: cutoff }
           },
@@ -269,6 +267,7 @@ class StockController {
   static async getStoreDistributionChart(req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
       const now         = new Date();
@@ -289,14 +288,14 @@ class StockController {
 
       const [storeCheckpoints, rows] = await Promise.all([
         prisma.checkpoint.findMany({
-          where: { code: { in: allowed }, type: 'STORE' },
+          where: { ...checkpointInCircle(circleCode), type: 'STORE' },
           select: { code: true, name: true },
           orderBy: { name: 'asc' }
         }),
         prisma.distribution.findMany({
           where: {
             status: 'DELIVERED',
-            OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }],
+            OR: [{ source: checkpointInCircle(circleCode) }, { target: checkpointInCircle(circleCode) }],
             target: { type: 'STORE', ...(checkpointCode && { code: checkpointCode }) },
             createdAt: { gte: yearStart, lte: cutoff }
           },
@@ -350,7 +349,7 @@ class StockController {
   static async getBatches(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, status, search } = req.query;
-      const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
 
       const allowedStatus = ['ONGOING', 'COMPLETED'];
 
@@ -361,7 +360,7 @@ class StockController {
       }
 
       const where: any = {
-        cards: { some: { checkpointCode: { in: allowed } } }
+        cards: { some: { checkpoint: checkpointInCircle(circleCode) } }
       };
       if (status) {
         where.status = status;
@@ -388,9 +387,9 @@ class StockController {
 
       const [totalBatch, totalCards, totalVerified, totalUnverified] = await Promise.all([
         prisma.uploadBatch.count({ where }),
-        prisma.card.count({ where: { checkpointCode: { in: allowed } } }),
-        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: 'VERIFIED' } }),
-        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: 'UNVERIFIED' } })
+        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode) } }),
+        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode), status: 'VERIFIED' } }),
+        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode), status: 'UNVERIFIED' } })
       ]);
 
       res.status(200).json({
@@ -557,11 +556,11 @@ class StockController {
   static async getCards(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, status, search, uploadAt, batch, validatedAt } = req.query;
-      const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
 
       const where: any = {
         // Scope to checkpoints in the user's circle; intersect with any requested checkpointCode
-        checkpointCode: { in: resolveCheckpointFilter(checkpointCode as string | undefined, allowed) }
+        checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined)
       };
       if (status) where.status = status;
       if (search) {
@@ -606,9 +605,9 @@ class StockController {
       ]);
 
       const [totalUpload, totalSold, totalAvailable] = await Promise.all([
-        prisma.card.count({ where: { checkpointCode: { in: allowed } } }),
-        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: "SOLD" } }),
-        prisma.card.count({ where: { checkpointCode: { in: allowed }, status: "VERIFIED" } })
+        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode) } }),
+        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode), status: "SOLD" } }),
+        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode), status: "VERIFIED" } })
       ])
 
       res.status(200).json({
@@ -1486,14 +1485,13 @@ class StockController {
   static async getNumbers(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, status, search, remark, sort } = req.query;
-      const allowed = req.checkpointCodes ?? [];
-      const checkpointFilter = resolveCheckpointFilter(checkpointCode as string | undefined, allowed);
+      const circleCode = req.user!.circleCode;
 
       // Numbers with no checkpoint are globally visible (available stock);
       // numbers with a checkpoint are restricted to the user's circle.
       const where: any = {
         AND: [
-          { OR: [{ checkpointCode: { in: checkpointFilter } }, { checkpointCode: null }] }
+          { OR: [{ checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined) }, { checkpointCode: null }] }
         ]
       };
       if (status) where.status = status;
@@ -1530,11 +1528,11 @@ class StockController {
 
       const numberAmountWhere = {
         OR: [
-          { checkpointCode: { in: checkpointFilter } },
+          { checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined) },
           { checkpointCode: null }
         ]
       };
-      const mergeAmountWhere = { checkpointCode: { in: allowed } };
+      const mergeAmountWhere = { checkpoint: checkpointInCircle(circleCode) };
 
       const [totalUpload, totalAvailable, totalMerge, monthlyMerge, dailyMerge] = await Promise.all([
         prisma.number.count({ where: numberAmountWhere }),
@@ -1673,10 +1671,10 @@ class StockController {
   static async getMerges(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, startSoldAt, endSoldAt, cardRemark, search, type } = req.query;
-      const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
 
       let where: any = {
-        checkpointCode: { in: resolveCheckpointFilter(checkpointCode as string | undefined, allowed) }
+        checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined)
       };
       if (startSoldAt) {
         where.createdAt = {
@@ -1718,7 +1716,7 @@ class StockController {
           where
         });
       }
-      const baseCountWhere = { checkpointCode: { in: allowed } };
+      const baseCountWhere = { checkpoint: checkpointInCircle(circleCode) };
       const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
       const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
 

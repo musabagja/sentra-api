@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
 import { Prisma } from '../../generated/prisma/client';
 
-import { hasCheckpointAccess } from '../utils/access.util';
+import { hasCheckpointAccess, checkpointInCircle } from '../utils/access.util';
 
 class CheckpointController {
   static async createCheckpoint(req: Request, res: Response, next: NextFunction) {
@@ -47,11 +47,11 @@ class CheckpointController {
   static async getCheckpoints(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit, type, search, startSoldAt, endSoldAt } = req.query;
-      const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
 
       const where: Prisma.CheckpointWhereInput = {
         // Scope to the checkpoints the user's circle covers
-        code: { in: allowed }
+        ...checkpointInCircle(circleCode)
       };
 
       if (type) {

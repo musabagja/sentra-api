@@ -28,3 +28,20 @@ export const resolveCheckpointFilter = (
   if (!requestedCode) return allowed;
   return allowed.includes(requestedCode) ? [requestedCode] : [];
 };
+
+/**
+ * Prisma relation filter scoping a Checkpoint (or a relation pointing at one)
+ * to the caller's circle, optionally narrowed to a single requested code.
+ *
+ * Use this instead of `checkpointCode: { in: allowed } }` — expanding a large
+ * circle (e.g. HQ, which spans every checkpoint) into an explicit `IN` list
+ * can exceed SQL Server's ~2100 query-parameter limit. This filters via a
+ * join on CheckpointCircle instead, which scales to any circle size.
+ */
+export const checkpointInCircle = (
+  circleCode: string,
+  requestedCode?: string
+) => ({
+  ...(requestedCode ? { code: requestedCode } : {}),
+  checkpointCircles: { some: { circleCode } }
+});

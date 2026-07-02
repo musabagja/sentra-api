@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import prisma from "../../lib/prisma";
-import { hasCheckpointAccess, resolveCheckpointFilter } from "../utils/access.util";
+import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from "../utils/access.util";
 
 class DistributionController {
   // ============================================================================
@@ -38,7 +38,7 @@ class DistributionController {
         throw err;
       }
 
-      const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
 
       const [distributions, cards, missingKeys] = await prisma.$transaction<[any[], any[], string[]]>(async (tx) => {
 
@@ -56,7 +56,7 @@ class DistributionController {
           where: {
             key: { in: cardKeys },
             status: "VERIFIED",
-            checkpointCode: { in: allowed }
+            checkpoint: checkpointInCircle(circleCode)
           }
         });
 
@@ -140,7 +140,7 @@ class DistributionController {
   static async getDistributions(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, status, sourceCode, targetCode, startDueDate, endDueDate } = req.query;
-      const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
 
       // Base access scope: user sees distributions where they own either end (source or target).
       // Specific filters are AND-appended on top — kept separate so they don't collapse into
@@ -149,8 +149,8 @@ class DistributionController {
         AND: [
           {
             OR: [
-              { sourceCode: { in: allowed } },
-              { targetCode: { in: allowed } }
+              { source: checkpointInCircle(circleCode) },
+              { target: checkpointInCircle(circleCode) }
             ]
           }
         ]
