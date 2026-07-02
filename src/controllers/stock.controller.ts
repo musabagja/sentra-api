@@ -46,7 +46,7 @@ class StockController {
         createdAt: { gte: yearStart, lte: cutoff }
       };
 
-      const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards, topSaleByUser, dcMonthlyRows, storeMonthlyRows] = await Promise.all([
+      const [dcAggregate, storeAggregate, allCheckpoints, latestStocks, baseInitialCount, brokenLostCards, topSaleByUser, dcMonthlyRows, storeMonthlyRows] = await Promise.all([
         // 1. Cards distributed TO DC checkpoints up to cutoff
         prisma.distribution.aggregate({
           _sum: { amount: true },
@@ -59,16 +59,19 @@ class StockController {
           where: { ...scopeFilter, target: { type: 'STORE' } }
         }),
 
-        // Shared checkpoint fetch — latest stock snapshot up to cutoff
+        // Shared checkpoint fetch
         prisma.checkpoint.findMany({
-          where: checkpointInCircle(circleCode),
-          include: {
-            cardStock: {
-              where: { createdAt: { lte: cutoff } },
-              orderBy: { createdAt: 'desc' },
-              take: 1
-            }
-          }
+          where: checkpointInCircle(circleCode)
+        }),
+
+        // Latest stock snapshot per checkpoint up to cutoff.
+        // Queried flat (not as a nested `include`) — a nested include would batch-load
+        // via `WHERE checkpointCode IN (<every checkpoint id just fetched>)`, which can
+        // exceed SQL Server's ~2100 parameter limit for large circles (e.g. HQ).
+        prisma.cardStock.findMany({
+          where: { checkpoint: checkpointInCircle(circleCode), createdAt: { lte: cutoff } },
+          orderBy: { createdAt: 'desc' },
+          distinct: ['checkpointCode']
         }),
 
         // Base initial stock: active cards created up to cutoff
@@ -144,13 +147,15 @@ class StockController {
 
       const initialStock = baseInitialCount + opnamedBrokenLostCount;
 
+      const stockByCheckpoint = Object.fromEntries(latestStocks.map(s => [s.checkpointCode, s.amount]));
+
       // Final stock: sum of latest CardStock snapshot per checkpoint up to cutoff
       const finalStock = allCheckpoints.reduce(
-        (sum, c) => sum + (c.cardStock[0]?.amount ?? 0), 0
+        (sum, c) => sum + (stockByCheckpoint[c.code] ?? 0), 0
       );
 
       const withStock = (c: typeof allCheckpoints[number]) =>
-        ({ ...c, currentStock: c.cardStock[0]?.amount ?? 0 });
+        ({ ...c, currentStock: stockByCheckpoint[c.code] ?? 0 });
 
       const topLeastStoreStock = allCheckpoints
         .filter(c => c.type === 'STORE')
