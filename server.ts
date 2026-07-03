@@ -29,8 +29,8 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // Reflect mode is convenient for shared dev/testing.
-    if (corsMode === "reflect") {
+    // Reflect/none modes allow any origin (convenient for shared dev/testing).
+    if (corsMode === "reflect" || corsMode === "none") {
       return callback(null, true);
     }
 
@@ -38,7 +38,9 @@ app.use(cors({
       return callback(null, true);
     }
 
-    return callback(new Error("Not allowed by CORS"));
+    // Reject without throwing: throwing yields a 500 with no CORS headers,
+    // which surfaces as an opaque preflight failure in the browser.
+    return callback(null, false);
   },
   credentials: true
 }))
