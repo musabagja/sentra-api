@@ -372,8 +372,8 @@ class StockController {
       }
       if (search) {
         where.OR = [
-          { code: { contains: search as string, mode: 'insensitive' } },
-          { name: { contains: search as string, mode: 'insensitive' } }
+          { code: { contains: search as string } },
+          { name: { contains: search as string } }
         ];
       }
 
@@ -570,8 +570,8 @@ class StockController {
       if (status) where.status = status;
       if (search) {
         where.OR = [
-          { key: { contains: search as string, mode: 'insensitive' } },
-          { name: { contains: search as string, mode: 'insensitive' } }
+          { key: { contains: search as string } },
+          { name: { contains: search as string } }
         ];
       }
       // validatedAt filter (related via Card -> Merge)
@@ -590,7 +590,7 @@ class StockController {
             }
           }),     
           ...(batch && {
-            code: { contains: batch as string, mode: 'insensitive' }
+            code: { contains: batch as string }
           })
         };
       }
@@ -1502,13 +1502,13 @@ class StockController {
       if (status) where.status = status;
       if (search) {
         where.OR = [
-          { key: { contains: search as string, mode: 'insensitive' } },
-          { name: { contains: search as string, mode: 'insensitive' } }
+          { key: { contains: search as string } },
+          { name: { contains: search as string } }
         ];
       }
       if (remark) {
         where.remark = {
-          contains: remark as string, mode: 'insensitive'
+          contains: remark as string
         }
       }
       if (sort && sort !== "ASC" && sort !== "DESC") {
