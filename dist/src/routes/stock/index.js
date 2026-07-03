@@ -37,10 +37,16 @@ router.put('/numbers/:key', stock_controller_1.default.updateNumber);
 router.delete('/numbers/:key', stock_controller_1.default.deleteNumber);
 // POST /api/upload/xlsx - Upload bunch of cards from Excel file
 router.post('/upload/xlsx', (0, multer_config_1.default)('xlsx').single('source'), stock_controller_1.default.uploadExcel);
+// POST /api/stock/upload/sold-xlsx - Mark sold cards as verified via Excel
+router.post('/upload/sold-xlsx', (0, multer_config_1.default)('xlsx').single('source'), stock_controller_1.default.uploadSoldExcel);
 // POST /api/stock/merge - Merge card and number
 router.post('/merges', stock_controller_1.default.mergeSim);
 router.post('/merges/bulk', stock_controller_1.default.bulkMergeSim);
 router.get('/merges', stock_controller_1.default.getMerges);
 // GET /api/stock/dashboard - Get dashboard data
 router.get('/dashboard', stock_controller_1.default.dashboardSync);
+// GET /api/stock/dashboard/dc-distribution - Monthly DC distribution chart
+router.get('/dashboard/dc-distribution', stock_controller_1.default.getDCDistributionChart);
+// GET /api/stock/dashboard/store-distribution - Monthly store distribution chart
+router.get('/dashboard/store-distribution', stock_controller_1.default.getStoreDistributionChart);
 exports.default = router;

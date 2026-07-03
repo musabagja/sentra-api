@@ -65,7 +65,7 @@ class UserController {
                 });
             });
             const refreshToken = jwt_util_1.default.sign({ session: session.id }, { expiresIn: '7d' });
-            const accessToken = jwt_util_1.default.sign({ id: user.id, name: user.name, code: user.code }, { expiresIn: '15m' });
+            const accessToken = jwt_util_1.default.sign({ id: user.id, name: user.name, code: user.code, session: session.id }, { expiresIn: '15m' });
             res.cookie('access_token', accessToken, cookieOptions(15 * 60 * 1000));
             res.cookie('refresh_token', refreshToken, cookieOptions(SESSION_TTL_MS));
             res.status(200).json({
@@ -142,7 +142,7 @@ class UserController {
                 });
             });
             const newRefreshToken = jwt_util_1.default.sign({ session: newSession.id }, { expiresIn: '7d' });
-            const newAccessToken = jwt_util_1.default.sign({ id: user.id, name: user.name, code: user.code }, { expiresIn: '15m' });
+            const newAccessToken = jwt_util_1.default.sign({ id: user.id, name: user.name, code: user.code, session: newSession.id }, { expiresIn: '15m' });
             res.cookie('refresh_token', newRefreshToken, cookieOptions(SESSION_TTL_MS));
             res.cookie('access_token', newAccessToken, cookieOptions(15 * 60 * 1000));
             res.status(200).json({ message: 'Refresh token successful' });

@@ -17,20 +17,7 @@ const router = express_1.default.Router();
 // ============================================================================
 // User authentication routes (no auth required)
 router.use('/user', user_1.default);
-// All routes below require authentication + checkpoint scope resolution
-router.use(auth_handler_1.default.authenticate);
-router.use(checkpoint_access_handler_1.default.load);
-// Stock management routes (cards and numbers)
-router.use('/stock', stock_1.default);
-// Opname (stock-taking) routes
-router.use('/opname', opname_1.default);
-// Distribution routes
-router.use('/distribution', distribution_1.default);
-// Checkpoint routes
-router.use('/checkpoint', checkpoint_1.default);
-// ============================================================================
-// HEALTH CHECK
-// ============================================================================
+// Health check — must be before auth middleware
 router.get("/", (req, res) => {
     return res.status(200).send({
         message: "Sentra API is running!!",
@@ -44,4 +31,15 @@ router.get("/", (req, res) => {
         }
     });
 });
+// All routes below require authentication + checkpoint scope resolution
+router.use(auth_handler_1.default.authenticate);
+router.use(checkpoint_access_handler_1.default.load);
+// Stock management routes (cards and numbers)
+router.use('/stock', stock_1.default);
+// Opname (stock-taking) routes
+router.use('/opname', opname_1.default);
+// Distribution routes
+router.use('/distribution', distribution_1.default);
+// Checkpoint routes
+router.use('/checkpoint', checkpoint_1.default);
 exports.default = router;

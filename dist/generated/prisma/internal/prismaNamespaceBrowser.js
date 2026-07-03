@@ -48,7 +48,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NullsOrder = exports.QueryMode = exports.SortOrder = exports.CheckpointCircleScalarFieldEnum = exports.CircleScalarFieldEnum = exports.SessionScalarFieldEnum = exports.PermissionScalarFieldEnum = exports.AccessScalarFieldEnum = exports.UserScalarFieldEnum = exports.OpnameUpdateScalarFieldEnum = exports.OpnameSubmittanceDocumentationScalarFieldEnum = exports.OpnameSubmittanceScalarFieldEnum = exports.OpnameScalarFieldEnum = exports.DistributionItemScalarFieldEnum = exports.DistributionSubmittanceScalarFieldEnum = exports.DistributionScalarFieldEnum = exports.NumberMovementScalarFieldEnum = exports.CardMovementScalarFieldEnum = exports.CardStockScalarFieldEnum = exports.MergeAdditionalScalarFieldEnum = exports.MergeScalarFieldEnum = exports.UploadBatchProgressScalarFieldEnum = exports.UploadBatchScalarFieldEnum = exports.NumberScalarFieldEnum = exports.CardScalarFieldEnum = exports.CheckpointScalarFieldEnum = exports.TransactionIsolationLevel = exports.ModelName = exports.AnyNull = exports.JsonNull = exports.DbNull = exports.NullTypes = exports.Decimal = void 0;
+exports.NullsOrder = exports.SortOrder = exports.CheckpointCircleScalarFieldEnum = exports.CircleScalarFieldEnum = exports.SessionScalarFieldEnum = exports.PermissionScalarFieldEnum = exports.AccessScalarFieldEnum = exports.UserScalarFieldEnum = exports.OpnameUpdateScalarFieldEnum = exports.OpnameSubmittanceDocumentationScalarFieldEnum = exports.OpnameSubmittanceScalarFieldEnum = exports.OpnameScalarFieldEnum = exports.DistributionItemScalarFieldEnum = exports.DistributionSubmittanceScalarFieldEnum = exports.DistributionScalarFieldEnum = exports.NumberMovementScalarFieldEnum = exports.CardMovementScalarFieldEnum = exports.CardStockScalarFieldEnum = exports.MergeAdditionalScalarFieldEnum = exports.MergeScalarFieldEnum = exports.UploadBatchProgressScalarFieldEnum = exports.UploadBatchScalarFieldEnum = exports.NumberScalarFieldEnum = exports.CardScalarFieldEnum = exports.CheckpointScalarFieldEnum = exports.TransactionIsolationLevel = exports.ModelName = exports.AnyNull = exports.JsonNull = exports.DbNull = exports.NullTypes = exports.Decimal = void 0;
 const runtime = __importStar(require("@prisma/client/runtime/index-browser"));
 exports.Decimal = runtime.Decimal;
 exports.NullTypes = {
@@ -106,7 +106,8 @@ exports.TransactionIsolationLevel = runtime.makeStrictEnum({
     ReadUncommitted: 'ReadUncommitted',
     ReadCommitted: 'ReadCommitted',
     RepeatableRead: 'RepeatableRead',
-    Serializable: 'Serializable'
+    Serializable: 'Serializable',
+    Snapshot: 'Snapshot'
 });
 exports.CheckpointScalarFieldEnum = {
     id: 'id',
@@ -322,10 +323,6 @@ exports.CheckpointCircleScalarFieldEnum = {
 exports.SortOrder = {
     asc: 'asc',
     desc: 'desc'
-};
-exports.QueryMode = {
-    default: 'default',
-    insensitive: 'insensitive'
 };
 exports.NullsOrder = {
     first: 'first',

@@ -14,39 +14,60 @@ class DistributionController {
             const { targetCode, scheduledAt, cardKeys } = req.body;
             if (!req.user)
                 throw new Error('User not found');
-            if (!targetCode)
-                throw new Error('targetCode is required');
-            if (!Array.isArray(cardKeys))
-                throw new Error('Cards must be an array');
-            if (cardKeys.length === 0)
-                throw new Error('Cards array cannot be empty');
-            if (!scheduledAt)
-                throw new Error('scheduledAt is required');
-            if (isNaN(new Date(scheduledAt).getTime()))
-                throw new Error('scheduledAt is not a valid date');
-            const allowed = req.checkpointCodes ?? [];
+            if (!targetCode) {
+                const err = new Error('targetCode is required');
+                err.status = 400;
+                throw err;
+            }
+            if (!Array.isArray(cardKeys)) {
+                const err = new Error('cardKeys must be an array');
+                err.status = 400;
+                throw err;
+            }
+            if (cardKeys.length === 0) {
+                const err = new Error('cardKeys array cannot be empty');
+                err.status = 400;
+                throw err;
+            }
+            if (!scheduledAt) {
+                const err = new Error('scheduledAt is required');
+                err.status = 400;
+                throw err;
+            }
+            if (isNaN(new Date(scheduledAt).getTime())) {
+                const err = new Error('scheduledAt is not a valid date');
+                err.status = 422;
+                throw err;
+            }
+            const circleCode = req.user.circleCode;
             const [distributions, cards, missingKeys] = await prisma_1.default.$transaction(async (tx) => {
                 const user = req.user;
                 const targetCheckpoint = await tx.checkpoint.findUnique({ where: { code: targetCode } });
                 if (!targetCheckpoint) {
-                    throw new Error('Target checkpoint not found');
+                    const err = new Error('Target checkpoint not found');
+                    err.status = 404;
+                    throw err;
                 }
                 // Only consider cards that are at checkpoints within the user's circle
                 const foundCards = await tx.card.findMany({
                     where: {
                         key: { in: cardKeys },
                         status: "VERIFIED",
-                        checkpointCode: { in: allowed }
+                        checkpoint: (0, access_util_1.checkpointInCircle)(circleCode)
                     }
                 });
                 if (foundCards.length === 0) {
-                    throw new Error('No verified cards found');
+                    const err = new Error('No verified cards found for the given keys');
+                    err.status = 422;
+                    throw err;
                 }
                 const missingKeys = cardKeys.filter(key => !foundCards.some(card => card.key === key));
                 const distinctSourceCodes = [...new Set(foundCards.map((card) => card.checkpointCode))];
                 if (targetCode && distinctSourceCodes.includes(targetCode)) {
                     const rejectedKeys = foundCards.filter(card => card.checkpointCode === targetCode).map(card => card.key);
-                    throw new Error(`Cards [${rejectedKeys.join(", ")}] are already at checkpoint ${targetCode}. Please deselect them and resubmit.`);
+                    const err = new Error(`Cards [${rejectedKeys.join(", ")}] are already at checkpoint ${targetCode}`);
+                    err.status = 422;
+                    throw err;
                 }
                 await tx.card.updateMany({
                     where: {
@@ -107,7 +128,7 @@ class DistributionController {
     static async getDistributions(req, res, next) {
         try {
             const { page = 1, limit = 10, status, sourceCode, targetCode, startDueDate, endDueDate } = req.query;
-            const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
             // Base access scope: user sees distributions where they own either end (source or target).
             // Specific filters are AND-appended on top — kept separate so they don't collapse into
             // an OR that returns results matching only one side when both filters are provided.
@@ -115,8 +136,8 @@ class DistributionController {
                 AND: [
                     {
                         OR: [
-                            { sourceCode: { in: allowed } },
-                            { targetCode: { in: allowed } }
+                            { source: (0, access_util_1.checkpointInCircle)(circleCode) },
+                            { target: (0, access_util_1.checkpointInCircle)(circleCode) }
                         ]
                     }
                 ]
@@ -210,11 +231,15 @@ class DistributionController {
             const allowed = req.checkpointCodes ?? [];
             const updatedDistribution = await prisma_1.default.$transaction(async (tx) => {
                 if (!status) {
-                    throw new Error('Status is required');
+                    const err = new Error('Status is required');
+                    err.status = 400;
+                    throw err;
                 }
                 const allowedStatuses = ["SCHEDULED", "DELIVERY"];
                 if (!allowedStatuses.includes(status)) {
-                    throw new Error('Invalid distribution status. Use the submit endpoint to mark as delivered, or the cancel endpoint to cancel');
+                    const err = new Error('Invalid status. Use the submit endpoint to mark as delivered, or the cancel endpoint to cancel');
+                    err.status = 400;
+                    throw err;
                 }
                 const distribution = await tx.distribution.findUnique({
                     where: { id: Number(id) },
@@ -238,7 +263,9 @@ class DistributionController {
                     throw err;
                 }
                 if (distribution.items.length === 0) {
-                    throw new Error('Distribution has no items');
+                    const err = new Error('Distribution has no items');
+                    err.status = 422;
+                    throw err;
                 }
                 const itemKeys = distribution.items.map(item => item.itemKey);
                 await tx.card.updateMany({
@@ -283,10 +310,14 @@ class DistributionController {
                     throw err;
                 }
                 if (currentDistribution.status === "DELIVERED") {
-                    throw new Error('Cannot cancel a delivered distribution');
+                    const err = new Error('Cannot cancel a delivered distribution');
+                    err.status = 409;
+                    throw err;
                 }
                 if (currentDistribution.status === "CANCELLED") {
-                    throw new Error('Distribution already cancelled');
+                    const err = new Error('Distribution is already cancelled');
+                    err.status = 409;
+                    throw err;
                 }
                 const updatedDistribution = await tx.distribution.update({
                     where: { id: Number(id) },
@@ -335,7 +366,9 @@ class DistributionController {
                     throw err;
                 }
                 if (distribution.status === "DELIVERED") {
-                    throw new Error('Distribution is already completed');
+                    const err = new Error('Distribution is already delivered');
+                    err.status = 409;
+                    throw err;
                 }
                 const itemKeys = distribution.items.map(item => item.itemKey);
                 // Validate before writing — if cards are gone the transaction rolls back cleanly
@@ -353,7 +386,9 @@ class DistributionController {
                     })
                 ]);
                 if (holdCount !== itemKeys.length) {
-                    throw new Error('Some cards are no longer available for distribution');
+                    const err = new Error('Some cards are no longer available for distribution');
+                    err.status = 409;
+                    throw err;
                 }
                 if (!sourceStock) {
                     throw new Error('Source checkpoint has no stock record');

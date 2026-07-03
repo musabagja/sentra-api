@@ -28,23 +28,33 @@ class OpnameController {
                     throw err;
                 }
                 if (opname.status !== "ONGOING") {
-                    throw new Error('Opname is not running');
+                    const err = new Error('Opname is not running');
+                    err.status = 409;
+                    throw err;
                 }
                 if (!card) {
-                    throw new Error('Card not found');
+                    const err = new Error('Card not found');
+                    err.status = 404;
+                    throw err;
                 }
                 if (card.status !== "OPNAME") {
-                    throw new Error('Card is not part of this opname');
+                    const err = new Error('Card is not part of this opname');
+                    err.status = 409;
+                    throw err;
                 }
                 if (card.checkpointCode !== opname.checkpointCode) {
-                    throw new Error('Card is not at the same checkpoint as the opname');
+                    const err = new Error('Card is not at the same checkpoint as the opname');
+                    err.status = 409;
+                    throw err;
                 }
                 // Prevent duplicate scans of the same card within this opname
                 const existingUpdate = await tx.opnameUpdate.findFirst({
                     where: { opnameID: Number(id), itemID: card.id }
                 });
                 if (existingUpdate) {
-                    throw new Error('Card has already been scanned in this opname');
+                    const err = new Error('Card has already been scanned in this opname');
+                    err.status = 409;
+                    throw err;
                 }
                 const [scannedCount, cardStock] = await Promise.all([
                     tx.opnameUpdate.count({ where: { opnameID: Number(id) } }),
@@ -68,7 +78,9 @@ class OpnameController {
                 // Decrement stock only when physically damaged or missing.
                 if (status === "BROKEN" || status === "LOST") {
                     if (cardStock.amount <= 0) {
-                        throw new Error('Stock is already at zero; cannot record further losses');
+                        const err = new Error('Stock is already at zero; cannot record further losses');
+                        err.status = 409;
+                        throw err;
                     }
                     await tx.cardStock.create({
                         data: {
@@ -100,6 +112,11 @@ class OpnameController {
         try {
             const { checkpointCode, type = 'ICCID' } = req.body;
             const allowed = req.checkpointCodes ?? [];
+            if (!checkpointCode) {
+                const err = new Error('checkpointCode is required');
+                err.status = 400;
+                throw err;
+            }
             const validTypes = ['ICCID', 'MSISDN'];
             if (!validTypes.includes(type)) {
                 const err = new Error(`Invalid opname type. Must be one of: ${validTypes.join(', ')}`);
@@ -116,14 +133,18 @@ class OpnameController {
                     where: { code: checkpointCode }
                 });
                 if (!checkpoint) {
-                    throw new Error('Checkpoint not found');
+                    const err = new Error('Checkpoint not found');
+                    err.status = 404;
+                    throw err;
                 }
                 const runningOpname = await tx.opname.findFirst({
                     where: { checkpointCode, status: "ONGOING" },
                     orderBy: { createdAt: 'desc' }
                 });
                 if (runningOpname) {
-                    throw new Error('Opname is already running');
+                    const err = new Error('An opname is already running for this checkpoint');
+                    err.status = 409;
+                    throw err;
                 }
                 const [amount, lastOpname] = await Promise.all([
                     type === 'ICCID'
@@ -309,9 +330,9 @@ class OpnameController {
     static async getOpnames(req, res, next) {
         try {
             const { page = 1, limit = 10, checkpointCode, type, startDate, endDate } = req.query;
-            const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
             const where = {
-                checkpointCode: { in: (0, access_util_1.resolveCheckpointFilter)(checkpointCode, allowed) }
+                checkpoint: (0, access_util_1.checkpointInCircle)(circleCode, checkpointCode)
             };
             if (type)
                 where.type = type;

@@ -43,61 +43,108 @@ class StockController {
     static async dashboardSync(req, res, next) {
         try {
             const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
+            const dcCode = req.query.dcCode;
+            const storeCode = req.query.storeCode;
+            const now = new Date();
+            const currentYear = now.getFullYear();
+            const currentMonth = now.getMonth() + 1; // 1-indexed
+            const year = Number(req.query.year) || currentYear;
+            const month = Number(req.query.month) || currentMonth;
+            // Cutoff: end of today when viewing the current month, otherwise last day of the requested month
+            const isCurrentPeriod = year === currentYear && month === currentMonth;
+            const cutoff = isCurrentPeriod
+                ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+                : new Date(year, month, 0, 23, 59, 59, 999); // day 0 of next month = last day of this month
+            const yearStart = new Date(year, 0, 1);
             const scopeFilter = {
                 status: 'DELIVERED',
-                OR: [{ sourceCode: { in: allowed } }, { targetCode: { in: allowed } }]
+                OR: [{ source: (0, access_util_1.checkpointInCircle)(circleCode) }, { target: (0, access_util_1.checkpointInCircle)(circleCode) }],
+                createdAt: { lte: cutoff }
             };
-            const [dcAggregate, storeAggregate, allCheckpoints, baseInitialCount, brokenLostCards, topSaleByUser] = await Promise.all([
-                // 1. Cards distributed TO DC checkpoints
+            const dcMonthlyWhere = {
+                ...scopeFilter,
+                target: { type: 'DC', ...(dcCode && { code: dcCode }) },
+                createdAt: { gte: yearStart, lte: cutoff }
+            };
+            const storeMonthlyWhere = {
+                ...scopeFilter,
+                target: { type: 'STORE', ...(storeCode && { code: storeCode }) },
+                createdAt: { gte: yearStart, lte: cutoff }
+            };
+            const [dcAggregate, storeAggregate, allCheckpoints, latestStocks, baseInitialCount, brokenLostCards, topSaleByUser, dcMonthlyRows, storeMonthlyRows] = await Promise.all([
+                // 1. Cards distributed TO DC checkpoints up to cutoff
                 prisma_1.default.distribution.aggregate({
                     _sum: { amount: true },
                     where: { ...scopeFilter, target: { type: 'DC' } }
                 }),
-                // 2. Cards distributed TO STORE checkpoints
+                // 2. Cards distributed TO STORE checkpoints up to cutoff
                 prisma_1.default.distribution.aggregate({
                     _sum: { amount: true },
                     where: { ...scopeFilter, target: { type: 'STORE' } }
                 }),
-                // Shared checkpoint fetch — split into STORE/DC in JS
+                // Shared checkpoint fetch
                 prisma_1.default.checkpoint.findMany({
-                    where: { code: { in: allowed } },
-                    include: { cardStock: { orderBy: { createdAt: 'desc' }, take: 1 } }
+                    where: (0, access_util_1.checkpointInCircle)(circleCode)
                 }),
-                // 5a. Base initial stock: VERIFIED + SOLD + DELIVERY + OPNAME
+                // Latest stock snapshot per checkpoint up to cutoff.
+                // Queried flat (not as a nested `include`) — a nested include would batch-load
+                // via `WHERE checkpointCode IN (<every checkpoint id just fetched>)`, which can
+                // exceed SQL Server's ~2100 parameter limit for large circles (e.g. HQ).
+                prisma_1.default.cardStock.findMany({
+                    where: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode), createdAt: { lte: cutoff } },
+                    orderBy: { createdAt: 'desc' },
+                    distinct: ['checkpointCode']
+                }),
+                // Base initial stock: active cards created up to cutoff
                 prisma_1.default.card.count({
-                    where: { checkpointCode: { in: allowed }, status: { in: ['VERIFIED', 'SOLD', 'DELIVERY', 'OPNAME'] } }
+                    where: {
+                        checkpoint: (0, access_util_1.checkpointInCircle)(circleCode),
+                        status: { in: ['VERIFIED', 'SOLD', 'DELIVERY', 'OPNAME'] },
+                        createdAt: { lte: cutoff }
+                    }
                 }),
-                // 5b. BROKEN/LOST candidates — need to check if opname-traced
+                // BROKEN/LOST candidates — need to check if opname-traced
                 prisma_1.default.card.findMany({
-                    where: { checkpointCode: { in: allowed }, status: { in: ['BROKEN', 'LOST'] } },
+                    where: {
+                        checkpoint: (0, access_util_1.checkpointInCircle)(circleCode),
+                        status: { in: ['BROKEN', 'LOST'] },
+                        createdAt: { lte: cutoff }
+                    },
                     select: { id: true }
                 }),
-                // Top 10 users by total sales (merges) within scope
+                // Top 10 users by total sales (merges) up to cutoff
                 prisma_1.default.merge.groupBy({
                     by: ['userCode'],
-                    where: { checkpointCode: { in: allowed } },
+                    where: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode), createdAt: { lte: cutoff } },
                     _count: { userCode: true },
                     orderBy: { _count: { userCode: 'desc' } },
                     take: 10
+                }),
+                // Monthly DC distributions for selected year up to cutoff
+                prisma_1.default.distribution.findMany({
+                    where: dcMonthlyWhere,
+                    select: { amount: true, createdAt: true }
+                }),
+                // Monthly STORE distributions for selected year up to cutoff
+                prisma_1.default.distribution.findMany({
+                    where: storeMonthlyWhere,
+                    select: { amount: true, createdAt: true }
                 })
             ]);
-            const storeCheckpointCodes = allCheckpoints
-                .filter(c => c.type === 'STORE')
-                .map(c => c.code);
             // Cards that are BROKEN/LOST but discovered via opname still count toward initial stock.
-            // OpnameUpdate.itemID = card.id but no Prisma relation exists, so we resolve in two steps.
             const brokenLostIds = brokenLostCards.map(c => c.id);
             const [opnamedBrokenLostCount, topSaleByCheckpoint] = await Promise.all([
                 brokenLostIds.length > 0
                     ? prisma_1.default.opnameUpdate.groupBy({
                         by: ['itemID'],
-                        where: { itemID: { in: brokenLostIds } }
+                        where: { itemID: { in: brokenLostIds }, createdAt: { lte: cutoff } }
                     }).then(groups => groups.length)
                     : Promise.resolve(0),
-                // Top 10 STORE checkpoints by total sales (merges)
+                // Top 10 STORE checkpoints by total sales (merges) up to cutoff
                 prisma_1.default.merge.groupBy({
                     by: ['checkpointCode'],
-                    where: { checkpointCode: { in: storeCheckpointCodes } },
+                    where: { checkpoint: { type: 'STORE', ...(0, access_util_1.checkpointInCircle)(circleCode) }, createdAt: { lte: cutoff } },
                     _count: { checkpointCode: true },
                     orderBy: { _count: { checkpointCode: 'desc' } },
                     take: 10
@@ -113,45 +160,148 @@ class StockController {
                 : [];
             const userDetailMap = Object.fromEntries(topUserDetails.map(u => [u.code, u]));
             const initialStock = baseInitialCount + opnamedBrokenLostCount;
-            // 6. Final stock: sum of latest CardStock per checkpoint
-            //    (already nets out sales, opname BROKEN/LOST, and adjustments)
-            const finalStock = allCheckpoints.reduce((sum, c) => sum + (c.cardStock[0]?.amount ?? 0), 0);
-            const withStock = (c) => ({ ...c, currentStock: c.cardStock[0]?.amount ?? 0 });
-            // 3. Top 10 STORE checkpoints with least current stock
+            const stockByCheckpoint = Object.fromEntries(latestStocks.map(s => [s.checkpointCode, s.amount]));
+            // Final stock: sum of latest CardStock snapshot per checkpoint up to cutoff
+            const finalStock = allCheckpoints.reduce((sum, c) => sum + (stockByCheckpoint[c.code] ?? 0), 0);
+            const withStock = (c) => ({ ...c, currentStock: stockByCheckpoint[c.code] ?? 0 });
             const topLeastStoreStock = allCheckpoints
                 .filter(c => c.type === 'STORE')
                 .map(withStock)
                 .sort((a, b) => a.currentStock - b.currentStock)
                 .slice(0, 10);
-            // 4. Top 10 DC checkpoints with most current stock
             const topMostDCStock = allCheckpoints
                 .filter(c => c.type === 'DC')
                 .map(withStock)
                 .sort((a, b) => b.currentStock - a.currentStock)
                 .slice(0, 10);
             const checkpointMap = Object.fromEntries(allCheckpoints.map(c => [c.code, c]));
-            // Top 10 STORE checkpoints ranked by highest sales
             const topHighestSaleByCheckpoint = topSaleByCheckpoint.map(row => ({
                 checkpoint: checkpointMap[row.checkpointCode],
                 totalSales: row._count.checkpointCode
             }));
-            // Top 10 users ranked by highest sales
             const topHighestSaleByUser = topSaleByUser.map(row => ({
                 user: userDetailMap[row.userCode] ?? { code: row.userCode, name: null },
                 totalSales: row._count.userCode
             }));
+            // 12-element monthly arrays — months after cutoff will be 0
+            const buildMonthlyTotals = (rows) => {
+                const months = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
+                for (const row of rows) {
+                    months[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+                }
+                return months;
+            };
+            const distributedToDCByMonth = buildMonthlyTotals(dcMonthlyRows);
+            const distributedToStoreByMonth = buildMonthlyTotals(storeMonthlyRows);
             res.status(200).json({
                 message: 'Dashboard synced successfully',
                 data: {
+                    year,
+                    month,
+                    cutoff,
                     initialStock,
                     finalStock,
                     distributedToDC: dcAggregate._sum.amount ?? 0,
                     distributedToStore: storeAggregate._sum.amount ?? 0,
+                    distributedToDCByMonth,
+                    distributedToStoreByMonth,
                     topLeastStoreStock,
                     topMostDCStock,
                     topHighestSaleByCheckpoint,
                     topHighestSaleByUser
                 }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    static async getDCDistributionChart(req, res, next) {
+        try {
+            const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
+            const checkpointCode = req.query.checkpointCode;
+            const now = new Date();
+            const currentYear = now.getFullYear();
+            const year = Number(req.query.year) || currentYear;
+            const cutoff = year === currentYear
+                ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+                : new Date(year, 11, 31, 23, 59, 59, 999);
+            const yearStart = new Date(year, 0, 1);
+            if (checkpointCode && !allowed.includes(checkpointCode)) {
+                const err = new Error('Checkpoint not found');
+                err.status = 404;
+                throw err;
+            }
+            const [dcCheckpoints, rows] = await Promise.all([
+                prisma_1.default.checkpoint.findMany({
+                    where: { ...(0, access_util_1.checkpointInCircle)(circleCode), type: 'DC' },
+                    select: { code: true, name: true },
+                    orderBy: { name: 'asc' }
+                }),
+                prisma_1.default.distribution.findMany({
+                    where: {
+                        status: 'DELIVERED',
+                        OR: [{ source: (0, access_util_1.checkpointInCircle)(circleCode) }, { target: (0, access_util_1.checkpointInCircle)(circleCode) }],
+                        target: { type: 'DC', ...(checkpointCode && { code: checkpointCode }) },
+                        createdAt: { gte: yearStart, lte: cutoff }
+                    },
+                    select: { amount: true, createdAt: true }
+                })
+            ]);
+            const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
+            for (const row of rows) {
+                chart[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+            }
+            res.status(200).json({
+                message: 'DC distribution chart retrieved successfully',
+                data: { year, cutoff, checkpoints: dcCheckpoints, chart }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    static async getStoreDistributionChart(req, res, next) {
+        try {
+            const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
+            const checkpointCode = req.query.checkpointCode;
+            const now = new Date();
+            const currentYear = now.getFullYear();
+            const year = Number(req.query.year) || currentYear;
+            const cutoff = year === currentYear
+                ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+                : new Date(year, 11, 31, 23, 59, 59, 999);
+            const yearStart = new Date(year, 0, 1);
+            if (checkpointCode && !allowed.includes(checkpointCode)) {
+                const err = new Error('Checkpoint not found');
+                err.status = 404;
+                throw err;
+            }
+            const [storeCheckpoints, rows] = await Promise.all([
+                prisma_1.default.checkpoint.findMany({
+                    where: { ...(0, access_util_1.checkpointInCircle)(circleCode), type: 'STORE' },
+                    select: { code: true, name: true },
+                    orderBy: { name: 'asc' }
+                }),
+                prisma_1.default.distribution.findMany({
+                    where: {
+                        status: 'DELIVERED',
+                        OR: [{ source: (0, access_util_1.checkpointInCircle)(circleCode) }, { target: (0, access_util_1.checkpointInCircle)(circleCode) }],
+                        target: { type: 'STORE', ...(checkpointCode && { code: checkpointCode }) },
+                        createdAt: { gte: yearStart, lte: cutoff }
+                    },
+                    select: { amount: true, createdAt: true }
+                })
+            ]);
+            const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
+            for (const row of rows) {
+                chart[new Date(row.createdAt).getMonth()].amount += row.amount ?? 0;
+            }
+            res.status(200).json({
+                message: 'Store distribution chart retrieved successfully',
+                data: { year, cutoff, checkpoints: storeCheckpoints, chart }
             });
         }
         catch (error) {
@@ -187,21 +337,23 @@ class StockController {
     static async getBatches(req, res, next) {
         try {
             const { page = 1, limit = 10, status, search } = req.query;
-            const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
             const allowedStatus = ['ONGOING', 'COMPLETED'];
             if (status && !allowedStatus.includes(status)) {
-                throw new Error('Invalid status');
+                const err = new Error('Invalid status');
+                err.status = 400;
+                throw err;
             }
             const where = {
-                cards: { some: { checkpointCode: { in: allowed } } }
+                cards: { some: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode) } }
             };
             if (status) {
                 where.status = status;
             }
             if (search) {
                 where.OR = [
-                    { code: { contains: search, mode: 'insensitive' } },
-                    { name: { contains: search, mode: 'insensitive' } }
+                    { code: { contains: search } },
+                    { name: { contains: search } }
                 ];
             }
             const batches = await prisma_1.default.uploadBatch.findMany({
@@ -218,9 +370,9 @@ class StockController {
             });
             const [totalBatch, totalCards, totalVerified, totalUnverified] = await Promise.all([
                 prisma_1.default.uploadBatch.count({ where }),
-                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed } } }),
-                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: 'VERIFIED' } }),
-                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: 'UNVERIFIED' } })
+                prisma_1.default.card.count({ where: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode) } }),
+                prisma_1.default.card.count({ where: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode), status: 'VERIFIED' } }),
+                prisma_1.default.card.count({ where: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode), status: 'UNVERIFIED' } })
             ]);
             res.status(200).json({
                 message: 'Cards retrieved successfully',
@@ -248,7 +400,7 @@ class StockController {
     static async completeBatch(req, res, next) {
         try {
             const { id } = req.params;
-            const { note } = req.body;
+            const { note } = req.body ?? {};
             const allowed = req.checkpointCodes ?? [];
             const batch = await prisma_1.default.$transaction(async (tx) => {
                 const currentBatch = await tx.uploadBatch.findUnique({
@@ -367,17 +519,17 @@ class StockController {
     static async getCards(req, res, next) {
         try {
             const { page = 1, limit = 10, checkpointCode, status, search, uploadAt, batch, validatedAt } = req.query;
-            const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
             const where = {
                 // Scope to checkpoints in the user's circle; intersect with any requested checkpointCode
-                checkpointCode: { in: (0, access_util_1.resolveCheckpointFilter)(checkpointCode, allowed) }
+                checkpoint: (0, access_util_1.checkpointInCircle)(circleCode, checkpointCode)
             };
             if (status)
                 where.status = status;
             if (search) {
                 where.OR = [
-                    { key: { contains: search, mode: 'insensitive' } },
-                    { name: { contains: search, mode: 'insensitive' } }
+                    { key: { contains: search } },
+                    { name: { contains: search } }
                 ];
             }
             // validatedAt filter (related via Card -> Merge)
@@ -396,7 +548,7 @@ class StockController {
                         }
                     }),
                     ...(batch && {
-                        code: { contains: batch, mode: 'insensitive' }
+                        code: { contains: batch }
                     })
                 };
             }
@@ -414,9 +566,9 @@ class StockController {
                 prisma_1.default.card.count({ where })
             ]);
             const [totalUpload, totalSold, totalAvailable] = await Promise.all([
-                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed } } }),
-                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: "SOLD" } }),
-                prisma_1.default.card.count({ where: { checkpointCode: { in: allowed }, status: "VERIFIED" } })
+                prisma_1.default.card.count({ where: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode) } }),
+                prisma_1.default.card.count({ where: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode), status: "SOLD" } }),
+                prisma_1.default.card.count({ where: { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode), status: "VERIFIED" } })
             ]);
             res.status(200).json({
                 message: 'Cards retrieved successfully',
@@ -467,9 +619,9 @@ class StockController {
     }
     static async deleteCard(req, res, next) {
         try {
-            const { id } = req.params;
+            const key = String(req.params.key);
             const allowed = req.checkpointCodes ?? [];
-            const existing = await prisma_1.default.card.findUnique({ where: { id: Number(id) } });
+            const existing = await prisma_1.default.card.findUnique({ where: { key } });
             if (!existing || !(0, access_util_1.hasCheckpointAccess)(existing.checkpointCode, allowed)) {
                 const err = new Error('Card not found');
                 err.status = 404;
@@ -501,16 +653,22 @@ class StockController {
                 throw new Error('User not found');
             }
             if (!file) {
-                throw new Error('No file uploaded');
+                const err = new Error('No file uploaded');
+                err.status = 400;
+                throw err;
             }
             // Parse Excel outside the transaction — CPU-bound work should not hold a DB connection
             const workbook = xlsx.read(file.buffer, { type: 'buffer' });
             if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-                throw new Error('Excel file has no sheets');
+                const err = new Error('Excel file has no sheets');
+                err.status = 422;
+                throw err;
             }
             const firstWorksheet = workbook.Sheets[workbook.SheetNames[0]];
             if (!firstWorksheet) {
-                throw new Error('Worksheet not found');
+                const err = new Error('Worksheet not found');
+                err.status = 422;
+                throw err;
             }
             const allowedSheets = ['ICCID', 'MSISDN'];
             const parsedSheets = [];
@@ -558,10 +716,16 @@ class StockController {
                 let batch;
                 if (batchID) {
                     const existing = await tx.uploadBatch.findUnique({ where: { id: Number(batchID) } });
-                    if (!existing)
-                        throw new Error(`Batch with id ${batchID} not found`);
-                    if (existing.status === 'COMPLETED')
-                        throw new Error(`Batch with id ${batchID} is already completed`);
+                    if (!existing) {
+                        const err = new Error(`Batch ${batchID} not found`);
+                        err.status = 404;
+                        throw err;
+                    }
+                    if (existing.status === 'COMPLETED') {
+                        const err = new Error(`Batch ${batchID} is already completed`);
+                        err.status = 409;
+                        throw err;
+                    }
                     batch = existing;
                 }
                 else {
@@ -583,9 +747,21 @@ class StockController {
                         data: { total: jsonData.find(s => s.sheet === 'ICCID')?.data.length || 0 }
                     });
                 }
-                const result = await Promise.all(jsonData.map(({ sheet, data }) => sheet === 'ICCID'
-                    ? tx.card.createMany({ data: data, skipDuplicates: true })
-                    : tx.number.createMany({ data, skipDuplicates: true })));
+                const result = await Promise.all(jsonData.map(async ({ sheet, data }) => {
+                    const keys = data.map((r) => r.key);
+                    if (sheet === 'ICCID') {
+                        const existing = await tx.card.findMany({ where: { key: { in: keys } }, select: { key: true } });
+                        const existingSet = new Set(existing.map(c => c.key));
+                        const newRows = data.filter((r) => !existingSet.has(r.key));
+                        return newRows.length > 0 ? tx.card.createMany({ data: newRows }) : { count: 0 };
+                    }
+                    else {
+                        const existing = await tx.number.findMany({ where: { key: { in: keys } }, select: { key: true } });
+                        const existingSet = new Set(existing.map(n => n.key));
+                        const newRows = data.filter((r) => !existingSet.has(r.key));
+                        return newRows.length > 0 ? tx.number.createMany({ data: newRows }) : { count: 0 };
+                    }
+                }));
                 const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
                 if (batchID) {
                     const newCardsCount = result[jsonData.findIndex(s => s.sheet === 'ICCID')]?.count ?? 0;
@@ -602,6 +778,152 @@ class StockController {
             res.status(200).json({
                 message: 'Upload completed successfully',
                 data: { total: parsedTotal, created: totalCreated, skipped: skippedCardRows }
+            });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    static async uploadSoldExcel(req, res, next) {
+        try {
+            const file = req.file;
+            if (!file) {
+                const err = new Error('No file uploaded');
+                err.status = 400;
+                throw err;
+            }
+            const workbook = xlsx.read(file.buffer, { type: 'buffer' });
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            if (!sheet) {
+                const err = new Error('Excel file has no sheets');
+                err.status = 422;
+                throw err;
+            }
+            const rows = xlsx.utils.sheet_to_json(sheet);
+            const parsed = [];
+            const seen = new Set();
+            for (const r of rows) {
+                const iccid = String(r.ICCID ?? r.iccid ?? '').trim();
+                const msisdn = String(r.MSISDN ?? r.msisdn ?? '').trim();
+                const storeCode = String(r.STORE_CODE ?? r.store_code ?? '').trim();
+                if (!iccid || seen.has(iccid))
+                    continue;
+                seen.add(iccid);
+                parsed.push({ iccid, msisdn, storeCode });
+            }
+            if (parsed.length === 0) {
+                const err = new Error('No ICCID values found in the file');
+                err.status = 422;
+                throw err;
+            }
+            const allowed = req.checkpointCodes ?? [];
+            const iccids = parsed.map(r => r.iccid);
+            const msisdns = parsed.map(r => r.msisdn).filter(Boolean);
+            // Fetch merges, cards, and numbers in parallel
+            const [merges, cards, numbers] = await Promise.all([
+                prisma_1.default.merge.findMany({
+                    where: { cardKey: { in: iccids } },
+                    select: { cardKey: true, numberKey: true, checkpointCode: true, soldAt: true, verifiedAt: true }
+                }),
+                prisma_1.default.card.findMany({
+                    where: { key: { in: iccids } },
+                    select: { key: true, status: true, validatedAt: true }
+                }),
+                msisdns.length > 0
+                    ? prisma_1.default.number.findMany({
+                        where: { key: { in: msisdns } },
+                        select: { key: true, status: true }
+                    })
+                    : Promise.resolve([])
+            ]);
+            const mergeMap = new Map(merges.map(m => [m.cardKey, m]));
+            const cardMap = new Map(cards.map(c => [c.key, c]));
+            const numberMap = new Map(numbers.map(n => [n.key, n]));
+            const notInMerge = [];
+            const storeNotAccessible = [];
+            const mismatched = [];
+            const checkpointMismatch = [];
+            const noSoldAt = [];
+            const notSoldStatus = [];
+            const numberNotSold = [];
+            const neverValidated = [];
+            for (const row of parsed) {
+                const merge = mergeMap.get(row.iccid);
+                const card = cardMap.get(row.iccid);
+                // 1. Must have a Merge record
+                if (!merge) {
+                    notInMerge.push(row.iccid);
+                    continue;
+                }
+                // 2. STORE_CODE must be in the user's accessible checkpoints
+                if (row.storeCode && !allowed.includes(row.storeCode)) {
+                    storeNotAccessible.push(row.iccid);
+                    continue;
+                }
+                // 3. MSISDN must match merge.numberKey
+                if (row.msisdn && merge.numberKey !== row.msisdn) {
+                    mismatched.push(`${row.iccid} (expected ${merge.numberKey}, got ${row.msisdn})`);
+                    continue;
+                }
+                // 4. merge.checkpointCode must match STORE_CODE
+                if (row.storeCode && merge.checkpointCode !== row.storeCode) {
+                    checkpointMismatch.push(`${row.iccid} (sold at ${merge.checkpointCode ?? 'unknown'}, got ${row.storeCode})`);
+                    continue;
+                }
+                // 5. merge.soldAt must not be null
+                if (!merge.soldAt) {
+                    noSoldAt.push(row.iccid);
+                    continue;
+                }
+                // 6. card.status must be SOLD
+                if (!card || card.status !== 'SOLD') {
+                    notSoldStatus.push(row.iccid);
+                    continue;
+                }
+                // 7. number.status must be SOLD
+                const number = numberMap.get(merge.numberKey);
+                if (!number || number.status !== 'SOLD') {
+                    numberNotSold.push(`${row.iccid} (MSISDN ${merge.numberKey} status: ${number?.status ?? 'not found'})`);
+                    continue;
+                }
+                // 8. card must have been physically validated
+                if (!card.validatedAt) {
+                    neverValidated.push(row.iccid);
+                }
+            }
+            const errors = [];
+            if (notInMerge.length > 0)
+                errors.push(`not in merge: ${notInMerge.join(', ')}`);
+            if (storeNotAccessible.length > 0)
+                errors.push(`store not accessible: ${storeNotAccessible.join(', ')}`);
+            if (mismatched.length > 0)
+                errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
+            if (checkpointMismatch.length > 0)
+                errors.push(`store mismatch: ${checkpointMismatch.join('; ')}`);
+            if (noSoldAt.length > 0)
+                errors.push(`soldAt missing: ${noSoldAt.join(', ')}`);
+            if (notSoldStatus.length > 0)
+                errors.push(`card not SOLD: ${notSoldStatus.join(', ')}`);
+            if (numberNotSold.length > 0)
+                errors.push(`number not SOLD: ${numberNotSold.join('; ')}`);
+            if (neverValidated.length > 0)
+                errors.push(`never validated: ${neverValidated.join(', ')}`);
+            if (errors.length > 0) {
+                const err = new Error(errors.join(' | '));
+                err.status = 422;
+                throw err;
+            }
+            const toUpdate = iccids.filter(k => mergeMap.get(k).verifiedAt === null);
+            const skipped = iccids.length - toUpdate.length;
+            if (toUpdate.length > 0) {
+                await prisma_1.default.merge.updateMany({
+                    where: { cardKey: { in: toUpdate } },
+                    data: { verifiedAt: new Date() }
+                });
+            }
+            res.status(200).json({
+                message: 'Sold cards updated successfully',
+                data: { total: iccids.length, updated: toUpdate.length, skipped }
             });
         }
         catch (error) {
@@ -626,7 +948,9 @@ class StockController {
                 }
                 const validTargetStatuses = ['VERIFIED', 'BROKEN'];
                 if (!rawStatus || !validTargetStatuses.includes(rawStatus)) {
-                    throw new Error("Please provide status, either 'VERIFIED' or 'BROKEN'");
+                    const err = new Error("Status must be 'VERIFIED' or 'BROKEN'");
+                    err.status = 400;
+                    throw err;
                 }
                 const nextStatus = rawStatus;
                 let updateData = {
@@ -637,7 +961,9 @@ class StockController {
                     include: { uploadBatch: true }
                 });
                 if (!card) {
-                    throw new Error('Card not found');
+                    const err = new Error('Card not found');
+                    err.status = 404;
+                    throw err;
                 }
                 const allowed = req.checkpointCodes ?? [];
                 if (!(0, access_util_1.hasCheckpointAccess)(card.checkpointCode, allowed)) {
@@ -646,19 +972,34 @@ class StockController {
                     throw err;
                 }
                 if (!card.uploadBatch) {
-                    throw new Error('Card upload batch not found');
+                    const err = new Error('Card upload batch not found');
+                    err.status = 404;
+                    throw err;
                 }
                 if (card.uploadBatch.status === "COMPLETED") {
-                    throw new Error('Card upload batch is already completed');
+                    const err = new Error('Card upload batch is already completed');
+                    err.status = 409;
+                    throw err;
                 }
                 if (card.status === 'OPNAME') {
-                    throw new Error('Card is currently in an opname session and cannot be modified');
+                    const err = new Error('Card is currently in an opname session and cannot be modified');
+                    err.status = 409;
+                    throw err;
                 }
                 if (card.status === 'DELIVERY') {
-                    throw new Error('Card is currently in delivery and cannot be modified');
+                    const err = new Error('Card is currently in delivery and cannot be modified');
+                    err.status = 409;
+                    throw err;
                 }
                 if (card.status === 'SOLD') {
-                    throw new Error('Card has already been sold');
+                    const err = new Error('Card has already been sold');
+                    err.status = 409;
+                    throw err;
+                }
+                if (card.status !== 'UNVERIFIED') {
+                    const err = new Error(`Card has already been validated`);
+                    err.status = 409;
+                    throw err;
                 }
                 if (card.status === "UNVERIFIED") {
                     updateData.validatedAt = new Date();
@@ -733,7 +1074,9 @@ class StockController {
                     }
                 }
                 else {
-                    throw new Error('Invalid status');
+                    const err = new Error('Invalid card status transition');
+                    err.status = 400;
+                    throw err;
                 }
                 return updatedCard;
             });
@@ -751,16 +1094,31 @@ class StockController {
             const { sims, checkpointCode, type, trn } = req.body;
             if (!req.user)
                 throw new Error('User not found');
-            if (!Array.isArray(sims) || sims.length === 0)
-                throw new Error('sims must be a non-empty array');
-            if (!type)
-                throw new Error('Type is required');
-            if (type === 'SIMCARD' && sims.some((s) => !s.cardKey))
-                throw new Error('ICCID is required for SIMCARD type');
-            if (!checkpointCode)
-                throw new Error('Checkpoint code is required');
-            if (!trn)
-                throw new Error('TRN is required');
+            if (!Array.isArray(sims) || sims.length === 0) {
+                const err = new Error('sims must be a non-empty array');
+                err.status = 400;
+                throw err;
+            }
+            if (!type) {
+                const err = new Error('Type is required');
+                err.status = 400;
+                throw err;
+            }
+            if (type === 'SIMCARD' && sims.some((s) => !s.cardKey)) {
+                const err = new Error('ICCID is required for SIMCARD type');
+                err.status = 400;
+                throw err;
+            }
+            if (!checkpointCode) {
+                const err = new Error('Checkpoint code is required');
+                err.status = 400;
+                throw err;
+            }
+            if (!trn) {
+                const err = new Error('TRN is required');
+                err.status = 400;
+                throw err;
+            }
             const allowed = req.checkpointCodes ?? [];
             if (!(0, access_util_1.hasCheckpointAccess)(checkpointCode, allowed)) {
                 const err = new Error('Checkpoint not found');
@@ -769,16 +1127,24 @@ class StockController {
             }
             const results = await prisma_1.default.$transaction(async (tx) => {
                 const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
-                if (!checkpoint)
-                    throw new Error(`Checkpoint not found: ${checkpointCode}`);
+                if (!checkpoint) {
+                    const err = new Error(`Checkpoint not found: ${checkpointCode}`);
+                    err.status = 404;
+                    throw err;
+                }
                 const merged = [];
                 for (const { cardKey, numberKey } of sims) {
                     if (type === 'SIMCARD' || type === 'ESIM') {
                         const number = await tx.number.findUnique({ where: { key: numberKey, status: 'VERIFIED' } });
-                        if (!number)
-                            throw new Error(`Number not found or not verified: ${numberKey}`);
+                        if (!number) {
+                            const err = new Error(`Number not found or not verified: ${numberKey}`);
+                            err.status = 404;
+                            throw err;
+                        }
                         if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
-                            throw new Error(`Number checkpoint code does not match: ${numberKey}`);
+                            const err = new Error(`Number ${numberKey} belongs to a different checkpoint`);
+                            err.status = 409;
+                            throw err;
                         }
                         await tx.number.update({ where: { key: numberKey }, data: { status: 'SOLD' } });
                     }
@@ -797,10 +1163,15 @@ class StockController {
                     }
                     if (type === 'SIMCARD') {
                         const card = await tx.card.findUnique({ where: { key: cardKey, status: 'VERIFIED' } });
-                        if (!card)
-                            throw new Error(`Card not found or not verified: ${cardKey}`);
+                        if (!card) {
+                            const err = new Error(`Card not found or not verified: ${cardKey}`);
+                            err.status = 404;
+                            throw err;
+                        }
                         if (checkpoint.code !== card.checkpointCode) {
-                            throw new Error(`Checkpoint code does not match card checkpoint code: ${cardKey}`);
+                            const err = new Error(`Card ${cardKey} is not at checkpoint ${checkpointCode}`);
+                            err.status = 409;
+                            throw err;
                         }
                         await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
                         const stock = await tx.cardStock.findFirst({
@@ -808,7 +1179,9 @@ class StockController {
                             orderBy: { createdAt: 'desc' }
                         });
                         if (!stock || Number(stock.amount) <= 0) {
-                            throw new Error(`Card unavailable at checkpoint: ${checkpointCode}`);
+                            const err = new Error(`No stock available at checkpoint ${checkpointCode}`);
+                            err.status = 409;
+                            throw err;
                         }
                         await Promise.all([
                             tx.cardStock.create({
@@ -850,14 +1223,26 @@ class StockController {
             const { cardKey, numberKey, checkpointCode, type, trn } = req.body;
             if (!req.user)
                 throw new Error('User not found');
-            if (!type)
-                throw new Error('Type is required');
-            if (type === 'SIMCARD' && !cardKey)
-                throw new Error('ICCID is required for SIMCARD type');
-            if (!checkpointCode)
-                throw new Error('Checkpoint code is required');
-            if (!trn)
-                throw new Error('TRN is required');
+            if (!type) {
+                const err = new Error('Type is required');
+                err.status = 400;
+                throw err;
+            }
+            if (type === 'SIMCARD' && !cardKey) {
+                const err = new Error('ICCID is required for SIMCARD type');
+                err.status = 400;
+                throw err;
+            }
+            if (!checkpointCode) {
+                const err = new Error('Checkpoint code is required');
+                err.status = 400;
+                throw err;
+            }
+            if (!trn) {
+                const err = new Error('TRN is required');
+                err.status = 400;
+                throw err;
+            }
             const allowed = req.checkpointCodes ?? [];
             if (!(0, access_util_1.hasCheckpointAccess)(checkpointCode, allowed)) {
                 const err = new Error('Checkpoint not found');
@@ -866,25 +1251,36 @@ class StockController {
             }
             const sim = await prisma_1.default.$transaction(async (tx) => {
                 const checkpoint = await tx.checkpoint.findUnique({ where: { code: checkpointCode } });
-                if (!checkpoint)
-                    throw new Error('Checkpoint not found');
+                if (!checkpoint) {
+                    const err = new Error('Checkpoint not found');
+                    err.status = 404;
+                    throw err;
+                }
                 if (type === "SIMCARD" || type === "ESIM") {
                     const number = await tx.number.findUnique({ where: { key: numberKey, status: "VERIFIED" } });
                     if (!number) {
-                        throw new Error('Number not found');
+                        const err = new Error('Number not found or not verified');
+                        err.status = 404;
+                        throw err;
                     }
                     if (number.checkpointCode !== null && number.checkpointCode !== checkpointCode) {
-                        throw new Error('Number checkpoint code does not match checkpoint code');
+                        const err = new Error('Number belongs to a different checkpoint');
+                        err.status = 409;
+                        throw err;
                     }
                     await tx.number.update({ where: { key: numberKey }, data: { status: 'SOLD' } });
                 }
                 if (type === "SIMCARD") {
                     const card = await tx.card.findUnique({ where: { key: cardKey, status: "VERIFIED" } });
                     if (!card) {
-                        throw new Error('Card not found');
+                        const err = new Error('Card not found or not verified');
+                        err.status = 404;
+                        throw err;
                     }
                     if (checkpoint.code !== card.checkpointCode) {
-                        throw new Error('Checkpoint code does not match card checkpoint code');
+                        const err = new Error('Card is not at the specified checkpoint');
+                        err.status = 409;
+                        throw err;
                     }
                     await tx.card.update({ where: { key: cardKey }, data: { status: 'SOLD' } });
                     const stock = await tx.cardStock.findFirst({
@@ -892,7 +1288,9 @@ class StockController {
                         orderBy: { createdAt: 'desc' }
                     });
                     if (!stock || Number(stock.amount) <= 0) {
-                        throw new Error('Card unavailable');
+                        const err = new Error('No stock available at this checkpoint');
+                        err.status = 409;
+                        throw err;
                     }
                     await Promise.all([
                         tx.cardStock.create({
@@ -989,32 +1387,31 @@ class StockController {
     static async getNumbers(req, res, next) {
         try {
             const { page = 1, limit = 10, checkpointCode, status, search, remark, sort } = req.query;
-            const allowed = req.checkpointCodes ?? [];
-            const checkpointFilter = (0, access_util_1.resolveCheckpointFilter)(checkpointCode, allowed);
+            const circleCode = req.user.circleCode;
             // Numbers with no checkpoint are globally visible (available stock);
             // numbers with a checkpoint are restricted to the user's circle.
             const where = {
                 AND: [
-                    { OR: [{ checkpointCode: { in: checkpointFilter } }, { checkpointCode: null }] }
+                    { OR: [{ checkpoint: (0, access_util_1.checkpointInCircle)(circleCode, checkpointCode) }, { checkpointCode: null }] }
                 ]
             };
             if (status)
                 where.status = status;
             if (search) {
                 where.OR = [
-                    { key: { contains: search, mode: 'insensitive' } },
-                    { name: { contains: search, mode: 'insensitive' } }
+                    { key: { contains: search } },
+                    { name: { contains: search } }
                 ];
             }
             if (remark) {
                 where.remark = {
-                    contains: remark, mode: 'insensitive'
+                    contains: remark
                 };
             }
-            if (sort) {
-                if (sort !== "ASC" && sort !== "DESC") {
-                    throw new Error("Sort field can only be filled with 'ASC' or 'DESC'");
-                }
+            if (sort && sort !== "ASC" && sort !== "DESC") {
+                const err = new Error("sort must be 'ASC' or 'DESC'");
+                err.status = 400;
+                throw err;
             }
             const [numbers, total] = await Promise.all([
                 prisma_1.default.number.findMany({
@@ -1031,11 +1428,11 @@ class StockController {
             ]);
             const numberAmountWhere = {
                 OR: [
-                    { checkpointCode: { in: checkpointFilter } },
+                    { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode, checkpointCode) },
                     { checkpointCode: null }
                 ]
             };
-            const mergeAmountWhere = { checkpointCode: { in: allowed } };
+            const mergeAmountWhere = { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode) };
             const [totalUpload, totalAvailable, totalMerge, monthlyMerge, dailyMerge] = await Promise.all([
                 prisma_1.default.number.count({ where: numberAmountWhere }),
                 prisma_1.default.number.count({ where: { ...numberAmountWhere, status: "VERIFIED" } }),
@@ -1163,9 +1560,9 @@ class StockController {
     static async getMerges(req, res, next) {
         try {
             const { page = 1, limit = 10, checkpointCode, startSoldAt, endSoldAt, cardRemark, search, type } = req.query;
-            const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
             let where = {
-                checkpointCode: { in: (0, access_util_1.resolveCheckpointFilter)(checkpointCode, allowed) }
+                checkpoint: (0, access_util_1.checkpointInCircle)(circleCode, checkpointCode)
             };
             if (startSoldAt) {
                 where.createdAt = {
@@ -1208,7 +1605,7 @@ class StockController {
                     where
                 });
             }
-            const baseCountWhere = { checkpointCode: { in: allowed } };
+            const baseCountWhere = { checkpoint: (0, access_util_1.checkpointInCircle)(circleCode) };
             const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
             const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
             const [total, monthly, daily] = isSimcardQuery

@@ -4,7 +4,6 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const prisma_1 = __importDefault(require("../../lib/prisma"));
-const enums_1 = require("../../generated/prisma/enums");
 const access_util_1 = require("../utils/access.util");
 class CheckpointController {
     static async createCheckpoint(req, res, next) {
@@ -15,7 +14,7 @@ class CheckpointController {
                 err.status = 400;
                 throw err;
             }
-            const validTypes = Object.values(enums_1.CheckpointType);
+            const validTypes = ['DC', 'STORE', 'HQ'];
             if (!validTypes.includes(type)) {
                 const err = new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
                 err.status = 400;
@@ -43,18 +42,18 @@ class CheckpointController {
     static async getCheckpoints(req, res, next) {
         try {
             const { page = 1, limit, type, search, startSoldAt, endSoldAt } = req.query;
-            const allowed = req.checkpointCodes ?? [];
+            const circleCode = req.user.circleCode;
             const where = {
                 // Scope to the checkpoints the user's circle covers
-                code: { in: allowed }
+                ...(0, access_util_1.checkpointInCircle)(circleCode)
             };
             if (type) {
                 where.type = type;
             }
             if (search) {
                 where.OR = [
-                    { code: { contains: search, mode: 'insensitive' } },
-                    { name: { contains: search, mode: 'insensitive' } }
+                    { code: { contains: search } },
+                    { name: { contains: search } }
                 ];
             }
             const includeMerges = !!(startSoldAt || endSoldAt);
@@ -85,7 +84,7 @@ class CheckpointController {
                         }
                     }
                 },
-                orderBy: { createdAt: 'desc' }
+                orderBy: { id: 'asc' }
             };
             const [checkpoints, total] = await Promise.all([
                 prisma_1.default.checkpoint.findMany(findManyOptions),
@@ -154,7 +153,7 @@ class CheckpointController {
             const { type, name } = req.body;
             const allowed = req.checkpointCodes ?? [];
             if (type) {
-                const validTypes = Object.values(enums_1.CheckpointType);
+                const validTypes = ['DC', 'STORE', 'HQ'];
                 if (!validTypes.includes(type)) {
                     const err = new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
                     err.status = 400;
