@@ -712,6 +712,13 @@ class StockController {
                 });
                 return { sheet, data };
             });
+            const CHUNK_SIZE = 500;
+            const chunk = (arr, size) => {
+                const chunks = [];
+                for (let i = 0; i < arr.length; i += size)
+                    chunks.push(arr.slice(i, i + size));
+                return chunks;
+            };
             const { totalCreated, parsedTotal } = await prisma_1.default.$transaction(async (tx) => {
                 let batch;
                 if (batchID) {
@@ -750,16 +757,32 @@ class StockController {
                 const result = await Promise.all(jsonData.map(async ({ sheet, data }) => {
                     const keys = data.map((r) => r.key);
                     if (sheet === 'ICCID') {
-                        const existing = await tx.card.findMany({ where: { key: { in: keys } }, select: { key: true } });
-                        const existingSet = new Set(existing.map(c => c.key));
+                        const existingSet = new Set();
+                        for (const keyChunk of chunk(keys, CHUNK_SIZE)) {
+                            const existing = await tx.card.findMany({ where: { key: { in: keyChunk } }, select: { key: true } });
+                            existing.forEach(c => existingSet.add(c.key));
+                        }
                         const newRows = data.filter((r) => !existingSet.has(r.key));
-                        return newRows.length > 0 ? tx.card.createMany({ data: newRows }) : { count: 0 };
+                        let count = 0;
+                        for (const rowChunk of chunk(newRows, CHUNK_SIZE)) {
+                            const created = await tx.card.createMany({ data: rowChunk });
+                            count += created.count;
+                        }
+                        return { count };
                     }
                     else {
-                        const existing = await tx.number.findMany({ where: { key: { in: keys } }, select: { key: true } });
-                        const existingSet = new Set(existing.map(n => n.key));
+                        const existingSet = new Set();
+                        for (const keyChunk of chunk(keys, CHUNK_SIZE)) {
+                            const existing = await tx.number.findMany({ where: { key: { in: keyChunk } }, select: { key: true } });
+                            existing.forEach(n => existingSet.add(n.key));
+                        }
                         const newRows = data.filter((r) => !existingSet.has(r.key));
-                        return newRows.length > 0 ? tx.number.createMany({ data: newRows }) : { count: 0 };
+                        let count = 0;
+                        for (const rowChunk of chunk(newRows, CHUNK_SIZE)) {
+                            const created = await tx.number.createMany({ data: rowChunk });
+                            count += created.count;
+                        }
+                        return { count };
                     }
                 }));
                 const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
@@ -774,6 +797,9 @@ class StockController {
                     await tx.uploadBatch.delete({ where: { id: batch.id } });
                 }
                 return { totalCreated, parsedTotal };
+            }, {
+                timeout: Number(process.env.UPLOAD_TX_TIMEOUT_MS) || 120000,
+                maxWait: Number(process.env.UPLOAD_TX_MAXWAIT_MS) || 10000
             });
             res.status(200).json({
                 message: 'Upload completed successfully',

@@ -772,6 +772,13 @@ class StockController {
         return { sheet, data };
       });
 
+      const CHUNK_SIZE = 500;
+      const chunk = <T,>(arr: T[], size: number): T[][] => {
+        const chunks: T[][] = [];
+        for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
+        return chunks;
+      };
+
       const { totalCreated, parsedTotal } = await prisma.$transaction(async (tx) => {
         let batch: { id: number; code: string };
 
@@ -815,15 +822,31 @@ class StockController {
           jsonData.map(async ({ sheet, data }) => {
             const keys = (data as any[]).map((r: any) => r.key as string);
             if (sheet === 'ICCID') {
-              const existing = await tx.card.findMany({ where: { key: { in: keys } }, select: { key: true } });
-              const existingSet = new Set(existing.map(c => c.key));
+              const existingSet = new Set<string>();
+              for (const keyChunk of chunk(keys, CHUNK_SIZE)) {
+                const existing = await tx.card.findMany({ where: { key: { in: keyChunk } }, select: { key: true } });
+                existing.forEach(c => existingSet.add(c.key));
+              }
               const newRows = (data as any[]).filter((r: any) => !existingSet.has(r.key));
-              return newRows.length > 0 ? tx.card.createMany({ data: newRows }) : { count: 0 };
+              let count = 0;
+              for (const rowChunk of chunk(newRows, CHUNK_SIZE)) {
+                const created = await tx.card.createMany({ data: rowChunk });
+                count += created.count;
+              }
+              return { count };
             } else {
-              const existing = await tx.number.findMany({ where: { key: { in: keys } }, select: { key: true } });
-              const existingSet = new Set(existing.map(n => n.key));
+              const existingSet = new Set<string>();
+              for (const keyChunk of chunk(keys, CHUNK_SIZE)) {
+                const existing = await tx.number.findMany({ where: { key: { in: keyChunk } }, select: { key: true } });
+                existing.forEach(n => existingSet.add(n.key));
+              }
               const newRows = data.filter((r: any) => !existingSet.has(r.key));
-              return newRows.length > 0 ? tx.number.createMany({ data: newRows }) : { count: 0 };
+              let count = 0;
+              for (const rowChunk of chunk(newRows, CHUNK_SIZE)) {
+                const created = await tx.number.createMany({ data: rowChunk });
+                count += created.count;
+              }
+              return { count };
             }
           })
         );
@@ -841,6 +864,9 @@ class StockController {
         }
 
         return { totalCreated, parsedTotal };
+      }, {
+        timeout: Number(process.env.UPLOAD_TX_TIMEOUT_MS) || 120000,
+        maxWait: Number(process.env.UPLOAD_TX_MAXWAIT_MS) || 10000
       });
 
       res.status(200).json({
