@@ -46,7 +46,7 @@ class StockController {
         createdAt: { gte: yearStart, lte: cutoff }
       };
 
-      const [dcAggregate, storeAggregate, allCheckpoints, latestStocks, baseInitialCount, brokenLostCards, topSaleByUser, dcMonthlyRows, storeMonthlyRows] = await Promise.all([
+      const [dcAggregate, storeAggregate, allCheckpoints, latestStocks, baseInitialCount, brokenLostCards, topSaleByUser, dcMonthlyRows, storeMonthlyRows, pendingRows] = await Promise.all([
         // 1. Cards distributed TO DC checkpoints up to cutoff
         prisma.distribution.aggregate({
           _sum: { amount: true },
@@ -112,6 +112,22 @@ class StockController {
         prisma.distribution.findMany({
           where: storeMonthlyWhere,
           select: { amount: true, createdAt: true }
+        }),
+
+        // Cards uploaded to a checkpoint but not yet validated. These are held
+        // physically but carry no CardStock entry — CardStock is only credited on
+        // UNVERIFIED -> VERIFIED (see validateCard) — so they are reported separately
+        // as `pendingStock` rather than folded into `currentStock`.
+        // Grouped via a relation filter, not an `IN` list, to stay under SQL Server's
+        // ~2100 parameter limit for large circles.
+        prisma.card.groupBy({
+          by: ['checkpointCode'],
+          where: {
+            checkpoint: checkpointInCircle(circleCode),
+            status: 'UNVERIFIED',
+            createdAt: { lte: cutoff }
+          },
+          _count: { _all: true }
         })
       ]);
 
@@ -154,8 +170,14 @@ class StockController {
         (sum, c) => sum + (stockByCheckpoint[c.code] ?? 0), 0
       );
 
+      const pendingByCheckpoint = Object.fromEntries(pendingRows.map(r => [r.checkpointCode, r._count._all]));
+
       const withStock = (c: typeof allCheckpoints[number]) =>
-        ({ ...c, currentStock: stockByCheckpoint[c.code] ?? 0 });
+        ({
+          ...c,
+          currentStock: stockByCheckpoint[c.code] ?? 0,
+          pendingStock: pendingByCheckpoint[c.code] ?? 0
+        });
 
       const storeStocks = allCheckpoints.filter(c => c.type === 'STORE').map(withStock);
       const dcStocks    = allCheckpoints.filter(c => c.type === 'DC').map(withStock);
@@ -164,17 +186,19 @@ class StockController {
       // checkpoints that have no CardStock snapshot yet (they fall back to 0), which
       // vastly outnumber the ones actually holding cards.
       // Response key kept as `topLeastStoreStock` for frontend compatibility.
-      const topLeastStoreStock = [...storeStocks]
-        .sort((a, b) => b.currentStock - a.currentStock)
-        .slice(0, 10);
+      // Tie-broken by pendingStock so a list of all-zero validated stock (every DC today)
+      // still ranks by what is actually sitting at the checkpoint awaiting validation.
+      const byStockThenPending = (a: { currentStock: number; pendingStock: number }, b: typeof a) =>
+        b.currentStock - a.currentStock || b.pendingStock - a.pendingStock;
 
-      const topMostDCStock = [...dcStocks]
-        .sort((a, b) => b.currentStock - a.currentStock)
-        .slice(0, 10);
+      const topLeastStoreStock = [...storeStocks].sort(byStockThenPending).slice(0, 10);
+      const topMostDCStock     = [...dcStocks].sort(byStockThenPending).slice(0, 10);
 
       // Circle-wide totals across every checkpoint of the type, not just the top 10
-      const totalStoreStock = storeStocks.reduce((sum, c) => sum + c.currentStock, 0);
-      const totalDCStock    = dcStocks.reduce((sum, c) => sum + c.currentStock, 0);
+      const totalStoreStock   = storeStocks.reduce((sum, c) => sum + c.currentStock, 0);
+      const totalDCStock      = dcStocks.reduce((sum, c) => sum + c.currentStock, 0);
+      const totalStorePending = storeStocks.reduce((sum, c) => sum + c.pendingStock, 0);
+      const totalDCPending    = dcStocks.reduce((sum, c) => sum + c.pendingStock, 0);
 
       const checkpointMap = Object.fromEntries(allCheckpoints.map(c => [c.code, c]));
 
@@ -216,6 +240,8 @@ class StockController {
           topMostDCStock,
           totalStoreStock,
           totalDCStock,
+          totalStorePending,
+          totalDCPending,
           topHighestSaleByCheckpoint,
           topHighestSaleByUser
         }
