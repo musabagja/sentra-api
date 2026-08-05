@@ -164,16 +164,21 @@ class StockController {
             // Final stock: sum of latest CardStock snapshot per checkpoint up to cutoff
             const finalStock = allCheckpoints.reduce((sum, c) => sum + (stockByCheckpoint[c.code] ?? 0), 0);
             const withStock = (c) => ({ ...c, currentStock: stockByCheckpoint[c.code] ?? 0 });
-            const topLeastStoreStock = allCheckpoints
-                .filter(c => c.type === 'STORE')
-                .map(withStock)
-                .sort((a, b) => a.currentStock - b.currentStock)
-                .slice(0, 10);
-            const topMostDCStock = allCheckpoints
-                .filter(c => c.type === 'DC')
-                .map(withStock)
+            const storeStocks = allCheckpoints.filter(c => c.type === 'STORE').map(withStock);
+            const dcStocks = allCheckpoints.filter(c => c.type === 'DC').map(withStock);
+            // Ranked by highest stock. Sorting ascending here would only ever surface the
+            // checkpoints that have no CardStock snapshot yet (they fall back to 0), which
+            // vastly outnumber the ones actually holding cards.
+            // Response key kept as `topLeastStoreStock` for frontend compatibility.
+            const topLeastStoreStock = [...storeStocks]
                 .sort((a, b) => b.currentStock - a.currentStock)
                 .slice(0, 10);
+            const topMostDCStock = [...dcStocks]
+                .sort((a, b) => b.currentStock - a.currentStock)
+                .slice(0, 10);
+            // Circle-wide totals across every checkpoint of the type, not just the top 10
+            const totalStoreStock = storeStocks.reduce((sum, c) => sum + c.currentStock, 0);
+            const totalDCStock = dcStocks.reduce((sum, c) => sum + c.currentStock, 0);
             const checkpointMap = Object.fromEntries(allCheckpoints.map(c => [c.code, c]));
             const topHighestSaleByCheckpoint = topSaleByCheckpoint.map(row => ({
                 checkpoint: checkpointMap[row.checkpointCode],
@@ -207,6 +212,8 @@ class StockController {
                     distributedToStoreByMonth,
                     topLeastStoreStock,
                     topMostDCStock,
+                    totalStoreStock,
+                    totalDCStock,
                     topHighestSaleByCheckpoint,
                     topHighestSaleByUser
                 }
