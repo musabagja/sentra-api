@@ -11,11 +11,21 @@
  * Cards already VERIFIED are left untouched.
  */
 require('tsx/cjs');
-require('dotenv').config({ path: '.env.test', override: true });
 
 const DEV_HOST = '10.145.25.233:14300';
-if (!(process.env.DATABASE_URL || '').includes(DEV_HOST)) {
+const PROD = process.argv.includes('--prod');
+
+// Development is the default target. Production requires --prod explicitly, so it can
+// never be reached by forgetting a flag.
+require('dotenv').config({ path: PROD ? '.env' : '.env.test', override: true });
+
+const url = process.env.DATABASE_URL || '';
+if (!PROD && !url.includes(DEV_HOST)) {
   console.error(`Refusing to run: DATABASE_URL is not the development database (${DEV_HOST}).`);
+  process.exit(1);
+}
+if (PROD && url.includes(DEV_HOST)) {
+  console.error('--prod was given but DATABASE_URL points at development. Aborting.');
   process.exit(1);
 }
 
@@ -44,7 +54,9 @@ const chunk = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.
     perBatch.set(c.batchCode, (perBatch.get(c.batchCode) ?? 0) + 1);
   }
 
-  console.log(APPLY ? '== APPLY ==' : '== DRY RUN (pass --apply to write) ==');
+  const target = `${(url.match(/:\/\/([^;]+)/) || [])[1]} / ${(url.match(/database=([^;]+)/) || [])[1]}`;
+  console.log(`${APPLY ? '== APPLY ==' : '== DRY RUN (pass --apply to write) =='}  target: ${target}` +
+              `${PROD ? '  *** PRODUCTION ***' : ''}`);
   for (const b of batches) {
     console.log(`  ${b.code}: ${perBatch.get(b.code) ?? 0} unverified of ${b.total} (owner ${b.userCode})`);
   }
