@@ -5,7 +5,7 @@
   "main": "server.ts",
   "type": "commonjs",
   "scripts": {
-    "test": "mocha --exit tests/*",
+    "test": "mocha",
     "dev": "tsx watch server.ts",
     "dev:nodemon": "nodemon --watch src --ext ts,json --exec tsx server.ts",
     "start": "node dist/server.js",

@@ -1,21 +1,22 @@
 const request = require('supertest');
-const assert = require('assert')
-const app = require('../server');
+const assert = require('assert');
+const app = require('../app').default;
 
-describe('GET /', () => {
-  it('responds responds to the world', async function() {
+describe('GET /api', () => {
+  it('responds with the health payload', async function () {
     const res = await request(app)
-      .get('/')
+      .get('/api')
       .set('Accept', 'application/json');
 
     assert.equal(res.status, 200);
     assert.equal(res.type, 'application/json');
-    assert.equal(res.body.message, 'Hello World!');
+    assert.equal(res.body.message, 'Sentra API is running!!');
+    assert.ok(res.body.endpoints, 'health payload should list endpoints');
   });
 });
 
 describe('GET /404', () => {
-  it('responds with a 404', async function() {
+  it('responds with a 404', async function () {
     const res = await request(app)
       .get('/404')
       .set('Accept', 'application/json');

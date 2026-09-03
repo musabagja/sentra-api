@@ -39,6 +39,48 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const prisma_1 = __importDefault(require("../../lib/prisma"));
 const xlsx = __importStar(require("xlsx"));
 const access_util_1 = require("../utils/access.util");
+// Excel hands back numeric cells as JS doubles. An ICCID is 19-20 digits, well past
+// Number.MAX_SAFE_INTEGER (~9.0e15), so an ICCID column that was not formatted as Text
+// arrives silently rounded and never matches the string keys stored in the DB.
+// Reading with raw:false makes SheetJS return each cell's displayed text instead.
+const sheetRows = (sheet) => xlsx.utils.sheet_to_json(sheet, { raw: false, defval: '' });
+// Values Excel already destroyed before we ever saw them, e.g. "8.96211E+18".
+const SCIENTIFIC = /^[+-]?\d+(\.\d+)?e[+-]?\d+$/i;
+/**
+ * Trim the decorations spreadsheets add around identifiers (spaces, NBSP, quotes,
+ * thousands separators, a leading +) without stripping trailing check letters that
+ * are part of some ICCIDs. `unreadable` marks a cell that reached us as a float.
+ */
+const normalizeKeyCell = (value) => {
+    const raw = value === null || value === undefined ? '' : String(value).trim();
+    if (!raw)
+        return { key: '', unreadable: false };
+    const cleaned = raw.replace(/[\s'"`,\u00a0]/g, '').replace(/^\+/, '');
+    if (SCIENTIFIC.test(cleaned))
+        return { key: raw, unreadable: true };
+    return { key: cleaned, unreadable: false };
+};
+// SQL Server caps a statement at 2,100 parameters, so `in` lists are always chunked.
+const CHUNK = 500;
+const chunkArray = (arr, size = CHUNK) => {
+    const chunks = [];
+    for (let i = 0; i < arr.length; i += size)
+        chunks.push(arr.slice(i, i + size));
+    return chunks;
+};
+const fetchChunked = async (keys, fn) => {
+    const out = [];
+    for (const batch of chunkArray(keys))
+        out.push(...(await fn(batch)));
+    return out;
+};
+// Error lists are capped so a bad 5,000-row upload does not return a 5,000-item payload.
+const MAX_LISTED_ERRORS = 50;
+const errorBucket = (items) => ({
+    count: items.length,
+    samples: items.slice(0, MAX_LISTED_ERRORS),
+    truncated: Math.max(0, items.length - MAX_LISTED_ERRORS)
+});
 class StockController {
     static async dashboardSync(req, res, next) {
         try {
@@ -706,7 +748,7 @@ class StockController {
                 const sheetData = workbook.Sheets[sheet];
                 if (!sheetData || !allowedSheets.includes(sheet))
                     continue;
-                parsedSheets.push({ sheet, rows: xlsx.utils.sheet_to_json(sheetData) });
+                parsedSheets.push({ sheet, rows: sheetRows(sheetData) });
             }
             const { batchID } = req.body;
             const userCode = req.user.code;
@@ -720,7 +762,7 @@ class StockController {
                 const seen = new Set();
                 const data = rows
                     .flatMap((row) => {
-                    const key = String(row.KEY || row.key);
+                    const key = normalizeKeyCell(row.KEY || row.key).key;
                     const rawCheckpoint = row.CHECKPOINT || row.checkpoint;
                     if (sheet === 'ICCID') {
                         if (!rawCheckpoint || !allowed.includes(String(rawCheckpoint))) {
@@ -855,47 +897,83 @@ class StockController {
                 err.status = 422;
                 throw err;
             }
-            const rows = xlsx.utils.sheet_to_json(sheet);
+            const rows = sheetRows(sheet);
             const parsed = [];
-            const seen = new Set();
-            for (const r of rows) {
-                const iccid = String(r.ICCID ?? r.iccid ?? '').trim();
-                const msisdn = String(r.MSISDN ?? r.msisdn ?? '').trim();
+            const unreadableIccid = [];
+            const duplicateInFile = [];
+            const seen = new Map();
+            for (const [index, r] of rows.entries()) {
+                // +2: one for the header row, one because spreadsheets count from 1.
+                const row = index + 2;
+                const iccidCell = normalizeKeyCell(r.ICCID ?? r.iccid);
+                const msisdnCell = normalizeKeyCell(r.MSISDN ?? r.msisdn);
                 const storeCode = String(r.STORE_CODE ?? r.store_code ?? '').trim();
-                if (!iccid || seen.has(iccid))
+                const trn = String(r.TRN ?? r.trn ?? '').trim();
+                if (iccidCell.unreadable) {
+                    unreadableIccid.push({ row, iccid: iccidCell.key, storeCode,
+                        detail: 'Excel saved this ICCID as a number, so its digits are already lost' });
                     continue;
-                seen.add(iccid);
-                parsed.push({ iccid, msisdn, storeCode });
+                }
+                const iccid = iccidCell.key;
+                if (!iccid)
+                    continue;
+                const firstRow = seen.get(iccid);
+                if (firstRow) {
+                    duplicateInFile.push({ row, iccid, storeCode, detail: `same ICCID already on row ${firstRow}` });
+                    continue;
+                }
+                seen.set(iccid, row);
+                parsed.push({ row, iccid, msisdn: msisdnCell.key, storeCode, trn: trn || null });
             }
-            if (parsed.length === 0) {
+            if (parsed.length === 0 && unreadableIccid.length === 0) {
                 const err = new Error('No ICCID values found in the file');
                 err.status = 422;
                 throw err;
             }
+            if (!req.user) {
+                const err = new Error('User not found');
+                err.status = 401;
+                throw err;
+            }
+            const userCode = req.user.code;
             const allowed = req.checkpointCodes ?? [];
             const iccids = parsed.map(r => r.iccid);
-            const msisdns = parsed.map(r => r.msisdn).filter(Boolean);
-            // Fetch merges, cards, and numbers in parallel
-            const [merges, cards, numbers] = await Promise.all([
-                prisma_1.default.merge.findMany({
-                    where: { cardKey: { in: iccids } },
+            const msisdns = [...new Set(parsed.map(r => r.msisdn).filter(Boolean))];
+            // Merges are looked up by both keys: cardKey decides verify-vs-create, numberKey
+            // catches an MSISDN already bound to a different card (Merge.numberKey is @unique).
+            const [merges, mergesByNumber, cards, numbers] = await Promise.all([
+                fetchChunked(iccids, batch => prisma_1.default.merge.findMany({
+                    where: { cardKey: { in: batch } },
                     select: { cardKey: true, numberKey: true, checkpointCode: true, soldAt: true, verifiedAt: true }
-                }),
-                prisma_1.default.card.findMany({
-                    where: { key: { in: iccids } },
-                    select: { key: true, status: true, validatedAt: true }
-                }),
-                msisdns.length > 0
-                    ? prisma_1.default.number.findMany({
-                        where: { key: { in: msisdns } },
-                        select: { key: true, status: true }
-                    })
-                    : Promise.resolve([])
+                })),
+                fetchChunked(msisdns, batch => prisma_1.default.merge.findMany({
+                    where: { numberKey: { in: batch } },
+                    select: { numberKey: true, cardKey: true }
+                })),
+                fetchChunked(iccids, batch => prisma_1.default.card.findMany({
+                    where: { key: { in: batch } },
+                    select: { id: true, key: true, status: true, validatedAt: true, checkpointCode: true }
+                })),
+                fetchChunked(msisdns, batch => prisma_1.default.number.findMany({
+                    where: { key: { in: batch } },
+                    select: { key: true, status: true }
+                }))
             ]);
             const mergeMap = new Map(merges.map(m => [m.cardKey, m]));
+            const mergeNumberMap = new Map(mergesByNumber.map(m => [m.numberKey, m]));
             const cardMap = new Map(cards.map(c => [c.key, c]));
             const numberMap = new Map(numbers.map(n => [n.key, n]));
-            const notInMerge = [];
+            // A row may leave MSISDN blank, in which case the merge's own numberKey was never
+            // in the fetch above — without this the verify path reports a bogus "number not SOLD".
+            const unfetchedNumberKeys = [...new Set(merges.map(m => m.numberKey).filter(k => !numberMap.has(k)))];
+            if (unfetchedNumberKeys.length > 0) {
+                const extra = await fetchChunked(unfetchedNumberKeys, batch => prisma_1.default.number.findMany({
+                    where: { key: { in: batch } },
+                    select: { key: true, status: true }
+                }));
+                extra.forEach(n => numberMap.set(n.key, n));
+            }
+            // Verify path (merge already exists)
             const storeNotAccessible = [];
             const mismatched = [];
             const checkpointMismatch = [];
@@ -903,83 +981,317 @@ class StockController {
             const notSoldStatus = [];
             const numberNotSold = [];
             const neverValidated = [];
+            // Create path (no merge yet)
+            const cardNotFound = [];
+            const cardNotVerified = [];
+            const cardCheckpointMismatch = [];
+            const storeCodeMissing = [];
+            const msisdnMissing = [];
+            const numberAlreadySold = [];
+            const numberBoundToOtherCard = [];
+            const duplicateMsisdn = [];
+            const toCreate = [];
+            const toVerify = [];
+            const msisdnSeen = new Map();
             for (const row of parsed) {
                 const merge = mergeMap.get(row.iccid);
                 const card = cardMap.get(row.iccid);
-                // 1. Must have a Merge record
-                if (!merge) {
-                    notInMerge.push(row.iccid);
+                // STORE_CODE, when present, must be inside the caller's accessible checkpoints
+                const issue = { row: row.row, iccid: row.iccid, msisdn: row.msisdn, storeCode: row.storeCode };
+                if (row.storeCode && !(0, access_util_1.hasCheckpointAccess)(row.storeCode, allowed)) {
+                    storeNotAccessible.push({ ...issue, detail: `store ${row.storeCode} is not a checkpoint you can access` });
                     continue;
                 }
-                // 2. STORE_CODE must be in the user's accessible checkpoints
-                if (row.storeCode && !allowed.includes(row.storeCode)) {
-                    storeNotAccessible.push(row.iccid);
+                if (merge) {
+                    // ---- Verify path: unchanged reconciliation rules ----
+                    if (row.msisdn && merge.numberKey !== row.msisdn) {
+                        mismatched.push({ ...issue, detail: `this ICCID is merged with ${merge.numberKey}, not ${row.msisdn}` });
+                        continue;
+                    }
+                    if (row.storeCode && merge.checkpointCode !== row.storeCode) {
+                        checkpointMismatch.push({ ...issue, detail: `the recorded sale was at ${merge.checkpointCode ?? 'unknown'}, not ${row.storeCode}` });
+                        continue;
+                    }
+                    if (!merge.soldAt) {
+                        noSoldAt.push({ ...issue, detail: 'the merge record has no sale date' });
+                        continue;
+                    }
+                    if (!card || card.status !== 'SOLD') {
+                        notSoldStatus.push({ ...issue, detail: `card status is ${card?.status ?? 'unknown'}, expected SOLD` });
+                        continue;
+                    }
+                    const number = numberMap.get(merge.numberKey);
+                    if (!number || number.status !== 'SOLD') {
+                        numberNotSold.push({ ...issue, detail: `MSISDN ${merge.numberKey} status is ${number?.status ?? 'not found'}, expected SOLD` });
+                        continue;
+                    }
+                    if (!card.validatedAt) {
+                        neverValidated.push({ ...issue, detail: 'card was never validated into stock' });
+                        continue;
+                    }
+                    toVerify.push(row.iccid);
                     continue;
                 }
-                // 3. MSISDN must match merge.numberKey
-                if (row.msisdn && merge.numberKey !== row.msisdn) {
-                    mismatched.push(`${row.iccid} (expected ${merge.numberKey}, got ${row.msisdn})`);
+                // ---- Create path: the sale has not been recorded yet ----
+                // Cards are never auto-created: the physical card must already be in stock.
+                if (!card) {
+                    cardNotFound.push({ ...issue, detail: 'this ICCID does not exist in the system' });
                     continue;
                 }
-                // 4. merge.checkpointCode must match STORE_CODE
-                if (row.storeCode && merge.checkpointCode !== row.storeCode) {
-                    checkpointMismatch.push(`${row.iccid} (sold at ${merge.checkpointCode ?? 'unknown'}, got ${row.storeCode})`);
+                if (card.status !== 'VERIFIED') {
+                    cardNotVerified.push({ ...issue, detail: `card status is ${card.status}; it must be VERIFIED before it can be sold` });
                     continue;
                 }
-                // 5. merge.soldAt must not be null
-                if (!merge.soldAt) {
-                    noSoldAt.push(row.iccid);
-                    continue;
-                }
-                // 6. card.status must be SOLD
-                if (!card || card.status !== 'SOLD') {
-                    notSoldStatus.push(row.iccid);
-                    continue;
-                }
-                // 7. number.status must be SOLD
-                const number = numberMap.get(merge.numberKey);
-                if (!number || number.status !== 'SOLD') {
-                    numberNotSold.push(`${row.iccid} (MSISDN ${merge.numberKey} status: ${number?.status ?? 'not found'})`);
-                    continue;
-                }
-                // 8. card must have been physically validated
                 if (!card.validatedAt) {
-                    neverValidated.push(row.iccid);
+                    neverValidated.push({ ...issue, detail: 'card was never validated into stock' });
+                    continue;
+                }
+                if (!row.storeCode) {
+                    storeCodeMissing.push({ ...issue, detail: 'STORE_CODE is empty' });
+                    continue;
+                }
+                if (card.checkpointCode !== row.storeCode) {
+                    cardCheckpointMismatch.push({ ...issue, detail: `card is currently held at ${card.checkpointCode}, not ${row.storeCode}` });
+                    continue;
+                }
+                if (!row.msisdn) {
+                    msisdnMissing.push({ ...issue, detail: 'MSISDN is empty' });
+                    continue;
+                }
+                const firstUse = msisdnSeen.get(row.msisdn);
+                if (firstUse) {
+                    duplicateMsisdn.push({ ...issue, detail: `MSISDN ${row.msisdn} is already used by ICCID ${firstUse}` });
+                    continue;
+                }
+                const boundMerge = mergeNumberMap.get(row.msisdn);
+                if (boundMerge) {
+                    numberBoundToOtherCard.push({ ...issue, detail: `MSISDN ${row.msisdn} is already merged with ${boundMerge.cardKey}` });
+                    continue;
+                }
+                // Numbers, unlike cards, are auto-created when absent.
+                const number = numberMap.get(row.msisdn);
+                if (number && number.status === 'SOLD') {
+                    numberAlreadySold.push({ ...issue, detail: `MSISDN ${row.msisdn} is already marked SOLD` });
+                    continue;
+                }
+                msisdnSeen.set(row.msisdn, row.iccid);
+                toCreate.push({ ...row, cardID: card.id });
+            }
+            // Stock is drawn down once per checkpoint rather than once per card.
+            const perCheckpoint = new Map();
+            for (const row of toCreate) {
+                perCheckpoint.set(row.storeCode, (perCheckpoint.get(row.storeCode) ?? 0) + 1);
+            }
+            const insufficientStock = [];
+            const stockPlan = [];
+            // Anchor each stock shortfall to the first row for that store, so the message
+            // still points somewhere findable in the sheet.
+            const firstRowForStore = new Map();
+            for (const r of toCreate)
+                if (!firstRowForStore.has(r.storeCode))
+                    firstRowForStore.set(r.storeCode, r);
+            if (perCheckpoint.size > 0) {
+                const snapshots = await Promise.all([...perCheckpoint.keys()].map(code => prisma_1.default.cardStock.findFirst({ where: { checkpointCode: code }, orderBy: { createdAt: 'desc' } })
+                    .then(stock => ({ code, amount: Number(stock?.amount ?? 0) }))));
+                for (const { code, amount } of snapshots) {
+                    const needed = perCheckpoint.get(code);
+                    if (amount < needed) {
+                        const anchor = firstRowForStore.get(code);
+                        insufficientStock.push({
+                            row: anchor?.row ?? 0,
+                            iccid: anchor?.iccid ?? '',
+                            storeCode: code,
+                            detail: `store ${code} has ${amount} card(s) in stock but this file sells ${needed}`
+                        });
+                    }
+                    else {
+                        stockPlan.push({ checkpointCode: code, nextAmount: amount - needed });
+                    }
                 }
             }
-            const errors = [];
-            if (notInMerge.length > 0)
-                errors.push(`not in merge: ${notInMerge.join(', ')}`);
-            if (storeNotAccessible.length > 0)
-                errors.push(`store not accessible: ${storeNotAccessible.join(', ')}`);
-            if (mismatched.length > 0)
-                errors.push(`MSISDN mismatch: ${mismatched.join('; ')}`);
-            if (checkpointMismatch.length > 0)
-                errors.push(`store mismatch: ${checkpointMismatch.join('; ')}`);
-            if (noSoldAt.length > 0)
-                errors.push(`soldAt missing: ${noSoldAt.join(', ')}`);
-            if (notSoldStatus.length > 0)
-                errors.push(`card not SOLD: ${notSoldStatus.join(', ')}`);
-            if (numberNotSold.length > 0)
-                errors.push(`number not SOLD: ${numberNotSold.join('; ')}`);
-            if (neverValidated.length > 0)
-                errors.push(`never validated: ${neverValidated.join(', ')}`);
-            if (errors.length > 0) {
-                const err = new Error(errors.join(' | '));
+            // Each bucket states the problem and the fix, so the person who uploaded the file
+            // can correct it and retry without needing anyone to interpret the response.
+            const buckets = [
+                { code: 'unreadableIccid', label: 'ICCID was saved as a number by Excel',
+                    action: 'Format the ICCID column as Text, re-enter those ICCIDs, and export again.',
+                    items: unreadableIccid },
+                { code: 'duplicateIccid', label: 'The same ICCID appears more than once',
+                    action: 'Delete the duplicate rows, keeping one row per ICCID.',
+                    items: duplicateInFile },
+                { code: 'cardNotFound', label: 'ICCID is not in the system',
+                    action: 'Check the ICCID for typos, or upload its stock batch first.',
+                    items: cardNotFound },
+                { code: 'storeNotAccessible', label: 'STORE_CODE is not a store you can access',
+                    action: 'Correct STORE_CODE to a store in your circle.',
+                    items: storeNotAccessible },
+                { code: 'storeCodeMissing', label: 'STORE_CODE is empty',
+                    action: 'Fill in the store where the card was sold.',
+                    items: storeCodeMissing },
+                { code: 'msisdnMissing', label: 'MSISDN is empty',
+                    action: 'Fill in the MSISDN that was sold with this ICCID.',
+                    items: msisdnMissing },
+                { code: 'cardNotVerified', label: 'Card has not been validated into stock',
+                    action: 'Validate the card at its checkpoint, then upload again.',
+                    items: cardNotVerified },
+                { code: 'neverValidated', label: 'Card was never physically validated',
+                    action: 'Validate the card at its checkpoint, then upload again.',
+                    items: neverValidated },
+                { code: 'cardCheckpointMismatch', label: 'Card is still held at a different location',
+                    action: 'Distribute or transfer the card to the store in STORE_CODE, or correct STORE_CODE to where the card actually is.',
+                    items: cardCheckpointMismatch },
+                { code: 'duplicateMsisdn', label: 'The same MSISDN is used on more than one row',
+                    action: 'Each MSISDN can be sold once — remove or correct the duplicate.',
+                    items: duplicateMsisdn },
+                { code: 'numberBoundToOtherCard', label: 'MSISDN is already merged with another ICCID',
+                    action: 'Check which ICCID this MSISDN belongs to and correct the row.',
+                    items: numberBoundToOtherCard },
+                { code: 'numberAlreadySold', label: 'MSISDN is already sold',
+                    action: 'This number was sold previously — remove the row or correct the MSISDN.',
+                    items: numberAlreadySold },
+                { code: 'insufficientStock', label: 'Not enough stock at the store',
+                    action: 'The store does not hold enough cards to cover these sales — check the stock figures.',
+                    items: insufficientStock },
+                { code: 'msisdnMismatch', label: 'MSISDN does not match the recorded sale',
+                    action: 'Correct the MSISDN to the one recorded against this ICCID.',
+                    items: mismatched },
+                { code: 'storeMismatch', label: 'STORE_CODE does not match the recorded sale',
+                    action: 'Correct STORE_CODE to the store where the sale was recorded.',
+                    items: checkpointMismatch },
+                { code: 'soldAtMissing', label: 'The recorded sale has no date',
+                    action: 'Contact support — this sale record is incomplete.',
+                    items: noSoldAt },
+                { code: 'cardNotSold', label: 'Card status is not SOLD',
+                    action: 'Contact support — the sale record and the card disagree.',
+                    items: notSoldStatus },
+                { code: 'numberNotSold', label: 'Number status is not SOLD',
+                    action: 'Contact support — the sale record and the number disagree.',
+                    items: numberNotSold }
+            ];
+            const failed = buckets.filter(b => b.items.length > 0);
+            // All-or-nothing: one bad row rejects the file and nothing is written.
+            if (failed.length > 0) {
+                const failedRows = failed.reduce((sum, b) => sum + b.items.length, 0);
+                const readyRows = parsed.length - failedRows + duplicateInFile.length;
+                const biggest = failed.reduce((a, b) => (b.items.length > a.items.length ? b : a));
+                // The message is written to stand on its own, so an existing client that only
+                // renders `message` still shows the user what to fix and where.
+                const EXAMPLES_PER_ISSUE = 3;
+                const n = (v) => v.toLocaleString('en-US');
+                const sections = failed.map((b, i) => {
+                    const examples = b.items.slice(0, EXAMPLES_PER_ISSUE).map(it => {
+                        const where = it.row > 0 ? `row ${it.row}` : 'file';
+                        const what = it.iccid ? ` (ICCID ${it.iccid})` : '';
+                        return `     - ${where}${what}: ${it.detail ?? b.label}`;
+                    });
+                    const rest = b.items.length - examples.length;
+                    if (rest > 0)
+                        examples.push(`     - ...and ${n(rest)} more row(s) with this problem`);
+                    return `${i + 1}. ${b.label} - ${n(b.items.length)} row(s)\n` +
+                        `   How to fix: ${b.action}\n` +
+                        `   Examples:\n${examples.join('\n')}`;
+                });
+                const err = new Error(`Upload rejected. ${n(failedRows)} of ${n(rows.length)} row(s) could not be processed, ` +
+                    `so nothing was saved and no cards were changed.\n` +
+                    (readyRows > 0
+                        ? `${n(readyRows)} row(s) are already correct and will go through once the problems below are fixed.\n`
+                        : '') +
+                    `\nProblems found:\n\n${sections.join('\n\n')}\n\n` +
+                    `Fix these rows in the Excel file and upload it again. ` +
+                    `The whole file is processed together, so every problem must be resolved before any sale is recorded.`);
                 err.status = 422;
+                err.details = {
+                    totalRows: rows.length,
+                    checkedRows: parsed.length,
+                    failedRows,
+                    readyRows: Math.max(0, readyRows),
+                    errors: Object.fromEntries(failed.map(b => [b.code, { label: b.label, action: b.action, ...errorBucket(b.items) }]))
+                };
                 throw err;
             }
-            const toUpdate = iccids.filter(k => mergeMap.get(k).verifiedAt === null);
-            const skipped = iccids.length - toUpdate.length;
-            if (toUpdate.length > 0) {
-                await prisma_1.default.merge.updateMany({
-                    where: { cardKey: { in: toUpdate } },
-                    data: { verifiedAt: new Date() }
-                });
-            }
+            const newNumbers = toCreate.filter(r => !numberMap.has(r.msisdn));
+            const result = await prisma_1.default.$transaction(async (tx) => {
+                const soldAt = new Date();
+                let batchCode = null;
+                if (toCreate.length > 0) {
+                    if (newNumbers.length > 0) {
+                        const stamp = soldAt.toISOString().slice(0, 10).replace(/-/g, '');
+                        batchCode = `AUTOSOLD-${stamp}-${Date.now().toString(36).toUpperCase()}`;
+                        await tx.uploadBatch.create({
+                            data: { code: batchCode, userCode, status: 'COMPLETED', total: newNumbers.length,
+                                note: 'Auto-created from sold Excel upload' }
+                        });
+                        for (const batch of chunkArray(newNumbers)) {
+                            await tx.number.createMany({
+                                data: batch.map(r => ({
+                                    key: r.msisdn,
+                                    checkpointCode: r.storeCode,
+                                    status: 'VERIFIED',
+                                    batchCode: batchCode,
+                                    remark: 'AUTO_CREATED_FROM_SOLD_UPLOAD'
+                                }))
+                            });
+                        }
+                    }
+                    const createMsisdns = toCreate.map(r => r.msisdn);
+                    const createIccids = toCreate.map(r => r.iccid);
+                    for (const batch of chunkArray(createMsisdns)) {
+                        await tx.number.updateMany({ where: { key: { in: batch } }, data: { status: 'SOLD' } });
+                    }
+                    for (const batch of chunkArray(createIccids)) {
+                        await tx.card.updateMany({ where: { key: { in: batch } }, data: { status: 'SOLD' } });
+                    }
+                    for (const batch of chunkArray(toCreate)) {
+                        await tx.cardMovement.createMany({
+                            data: batch.map(r => ({
+                                cardID: r.cardID,
+                                type: 'SALE',
+                                userCode,
+                                sourceCode: r.storeCode,
+                                targetCode: null
+                            }))
+                        });
+                    }
+                    for (const { checkpointCode, nextAmount } of stockPlan) {
+                        await tx.cardStock.create({ data: { checkpointCode, amount: nextAmount } });
+                    }
+                    for (const batch of chunkArray(toCreate)) {
+                        await tx.merge.createMany({
+                            data: batch.map(r => ({
+                                cardKey: r.iccid,
+                                numberKey: r.msisdn,
+                                checkpointCode: r.storeCode,
+                                userCode,
+                                TRN: r.trn,
+                                soldAt,
+                                verifiedAt: soldAt
+                            }))
+                        });
+                    }
+                }
+                let verified = 0;
+                const pending = toVerify.filter(k => mergeMap.get(k).verifiedAt === null);
+                for (const batch of chunkArray(pending)) {
+                    const updated = await tx.merge.updateMany({
+                        where: { cardKey: { in: batch } },
+                        data: { verifiedAt: soldAt }
+                    });
+                    verified += updated.count;
+                }
+                return { verified, batchCode };
+            }, {
+                timeout: Number(process.env.UPLOAD_TX_TIMEOUT_MS) || 120000,
+                maxWait: Number(process.env.UPLOAD_TX_MAXWAIT_MS) || 10000
+            });
             res.status(200).json({
-                message: 'Sold cards updated successfully',
-                data: { total: iccids.length, updated: toUpdate.length, skipped }
+                message: 'Sold cards processed successfully',
+                data: {
+                    total: parsed.length,
+                    merged: toCreate.length,
+                    verified: result.verified,
+                    skipped: toVerify.length - result.verified,
+                    numbersCreated: newNumbers.length,
+                    batchCode: result.batchCode
+                }
             });
         }
         catch (error) {
