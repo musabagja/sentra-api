@@ -189,7 +189,7 @@ class StockController {
 
       // Cards that are BROKEN/LOST but discovered via opname still count toward initial stock.
       const brokenLostIds = brokenLostCards.map(c => c.id);
-      const [opnamedBrokenLostCount, topSaleByCheckpoint] = await Promise.all([
+      const [opnamedBrokenLostCount, topSaleByCheckpoint, totalSales] = await Promise.all([
         brokenLostIds.length > 0
           ? prisma.opnameUpdate.groupBy({
               by: ['itemID'],
@@ -204,6 +204,14 @@ class StockController {
           _count: { checkpointCode: true },
           orderBy: { _count: { checkpointCode: 'desc' } },
           take: 10
+        }),
+
+        // Circle-wide sales (merges) up to cutoff. Same unit as the per-row
+        // `totalSales` on topHighestSaleByCheckpoint/ByUser below, which are its
+        // breakdown — so the dashboard figures reconcile. Note this is NOT the
+        // `Card.status = 'SOLD'` count exposed as `amount.sold` by the card list.
+        prisma.merge.count({
+          where: { checkpoint: checkpointInCircle(circleCode), createdAt: { lte: cutoff } }
         })
       ]);
 
@@ -237,6 +245,11 @@ class StockController {
 
       const storeStocks = allCheckpoints.filter(c => c.type === 'STORE').map(withStock);
       const dcStocks    = allCheckpoints.filter(c => c.type === 'DC').map(withStock);
+      // HQ. Filtered as "neither STORE nor DC" rather than `type === 'HQ'` so that a
+      // checkpoint whose free-form `type` string drifts (casing, a new value) still
+      // lands somewhere: `finalStock` sums every checkpoint, so anything missed here
+      // would make totalStoreStock + totalDCStock silently under-report it.
+      const hqStocks = allCheckpoints.filter(c => c.type !== 'STORE' && c.type !== 'DC').map(withStock);
 
       // Ranked by highest stock. Sorting ascending here would only ever surface the
       // checkpoints that have no CardStock snapshot yet (they fall back to 0), which
@@ -255,6 +268,11 @@ class StockController {
       const totalDCStock      = dcStocks.reduce((sum, c) => sum + c.currentStock, 0);
       const totalStorePending = storeStocks.reduce((sum, c) => sum + c.pendingStock, 0);
       const totalDCPending    = dcStocks.reduce((sum, c) => sum + c.pendingStock, 0);
+      const totalHQStock      = hqStocks.reduce((sum, c) => sum + c.currentStock, 0);
+      const totalHQPending    = hqStocks.reduce((sum, c) => sum + c.pendingStock, 0);
+      // Invariant: totalStock === finalStock
+      const totalStock        = totalStoreStock + totalDCStock + totalHQStock;
+      const totalPending      = totalStorePending + totalDCPending + totalHQPending;
 
       const checkpointMap = Object.fromEntries(allCheckpoints.map(c => [c.code, c]));
 
@@ -298,6 +316,11 @@ class StockController {
           totalDCStock,
           totalStorePending,
           totalDCPending,
+          totalHQStock,
+          totalHQPending,
+          totalStock,
+          totalPending,
+          totalSales,
           topHighestSaleByCheckpoint,
           topHighestSaleByUser
         }
