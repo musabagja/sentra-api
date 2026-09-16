@@ -7,15 +7,26 @@
  * and writes one sheet per issue, plus the rows that are ready to upload as-is.
  */
 require('tsx/cjs');
-require('dotenv').config({ path: '.env.test', override: true });
+
+const DEV_HOST = '10.145.25.233:14300';
+const PROD = process.argv.includes('--prod');
+const FLAT = process.argv.includes('--flat');
+require('dotenv').config({ path: PROD ? '.env' : '.env.test', override: true });
+
+const url = process.env.DATABASE_URL || '';
+if (!PROD && !url.includes(DEV_HOST)) {
+  console.error(`Refusing to run: DATABASE_URL is not the development database (${DEV_HOST}).`);
+  process.exit(1);
+}
 
 const fs = require('fs');
 const xlsx = require('xlsx');
 const prisma = require('../lib/prisma').default;
 
-const IN = process.argv[2];
-const OUT = process.argv[3] || IN.replace(/\.xlsx$/i, '') + ' - ISSUES.xlsx';
-if (!IN) { console.error('Usage: report-sold-upload-issues.js <input.xlsx> [output.xlsx]'); process.exit(1); }
+const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
+const IN = args[0];
+const OUT = args[1] || (IN || '').replace(/\.xlsx$/i, '') + ' - NEEDS FIXING.xlsx';
+if (!IN) { console.error('Usage: report-sold-upload-issues.js <input.xlsx> [output.xlsx] [--prod] [--flat]'); process.exit(1); }
 
 const chunk = (a, n = 500) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
 
@@ -104,6 +115,41 @@ const chunk = (a, n = 500) => { const o = []; for (let i = 0; i < a.length; i +=
   ];
 
   const out = xlsx.utils.book_new();
+
+  if (FLAT) {
+    // One sheet, every failing row, sorted by position in the original file.
+    const label = {
+      mismatch: 'Card is at another location',
+      unknownStore: 'Store code does not exist',
+      notVerified: 'Card not validated into stock',
+      notFound: 'ICCID unknown to the system',
+      duplicate: 'Duplicate ICCID in this file'
+    };
+    const flat = [
+      ...mismatch.map(r => ({ ...r, ISSUE: label.mismatch })),
+      ...unknownStore.map(r => ({ ...r, ISSUE: label.unknownStore })),
+      ...notVerified.map(r => ({ ...r, ISSUE: label.notVerified })),
+      ...notFound.map(r => ({ ...r, ISSUE: label.notFound })),
+      ...duplicate.map(r => ({ ...r, ISSUE: label.duplicate }))
+    ]
+      .sort((a, b) => a.ROW - b.ROW)
+      .map(r => ({
+        ROW: r.ROW, ICCID: r.ICCID, MSISDN: r.MSISDN ?? '', STORE_CODE_IN_FILE: r.STORE_CODE_IN_FILE,
+        ISSUE: r.ISSUE, CARD_IS_AT: r.CARD_IS_AT ?? '', CARD_LOCATION_TYPE: r.CARD_LOCATION_TYPE ?? '',
+        CARD_STATUS: r.CARD_STATUS ?? '', UPLOAD_BATCH: r.UPLOAD_BATCH ?? '',
+        FIRST_SEEN_ON_ROW: r.FIRST_SEEN_ON_ROW ?? '', WHAT_TO_DO: r.ACTION
+      }));
+    xlsx.utils.book_append_sheet(out, xlsx.utils.json_to_sheet(flat), 'ROWS TO FIX');
+    // Keep the passing rows alongside them: this sheet is what gets uploaded.
+    if (valid.length) xlsx.utils.book_append_sheet(out, xlsx.utils.json_to_sheet(valid), 'READY TO UPLOAD');
+    xlsx.utils.book_append_sheet(out, xlsx.utils.json_to_sheet(summary), 'SUMMARY');
+    xlsx.writeFile(out, OUT);
+    console.log('written:', OUT, `| ${flat.length} failing row(s), ${valid.length} ready`);
+    console.table(summary);
+    await prisma.$disconnect();
+    return;
+  }
+
   const add = (name, data) => {
     if (!data.length) return;
     xlsx.utils.book_append_sheet(out, xlsx.utils.json_to_sheet(data), name);
