@@ -85,14 +85,19 @@ class DistributionController {
           data: { status: "DELIVERY" }
         });
 
-        const lastDistribution = await tx.distribution.findFirst({
-          orderBy: {
-            id: 'desc'
-          }
+        // Number the batch from the highest existing DV-<n>, ignoring any batch
+        // that is not one. Reading only the newest row breaks as soon as it was
+        // written by something else (a backfill, say): parseInt returns NaN and
+        // every later distribution inherits it as DV-NaN.
+        const dvBatches = await tx.distribution.findMany({
+          where: { batch: { startsWith: 'DV-' } },
+          select: { batch: true }
         });
-
-        const nextId = lastDistribution && lastDistribution.batch ? parseInt(lastDistribution.batch.replace('DV-', '')) + 1 : 1;
-        const nextBatch = `DV-${nextId.toString()}`;
+        const highest = dvBatches.reduce((max, d) => {
+          const match = /^DV-(\d+)$/.exec(d.batch ?? '');
+          return match ? Math.max(max, Number(match[1])) : max;
+        }, 0);
+        const nextBatch = `DV-${highest + 1}`;
 
         const cardsBySource = foundCards.reduce((acc, card) => {
           const group = acc[card.checkpointCode];
