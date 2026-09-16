@@ -893,8 +893,17 @@ class StockController {
         return chunks;
       };
 
+      // One timestamp for the whole upload, so a card's validatedAt, its INITIAL
+      // movement and the stock snapshot all agree.
+      const validatedAt = new Date();
+
       const { totalCreated, parsedTotal } = await prisma.$transaction(async (tx) => {
         let batch: { id: number; code: string };
+        // Stock is written once per checkpoint, never once per card: CardStock is a
+        // latest-row-wins snapshot, so N rows per checkpoint would leave the
+        // intermediate arithmetic wrong. Scoped inside the transaction so a retry
+        // starts from an empty tally rather than double-counting.
+        const perCheckpoint = new Map<string, number>();
 
         if (batchID) {
           const existing = await tx.uploadBatch.findUnique({ where: { id: Number(batchID) } });
@@ -943,9 +952,33 @@ class StockController {
               }
               const newRows = (data as any[]).filter((r: any) => !existingSet.has(r.key));
               let count = 0;
+              // Uploaded cards enter stock immediately — no separate validation step.
+              // That means reproducing every side effect validateCard would have
+              // written, or the dashboard's two stock figures drift apart:
+              // initialStock counts cards, finalStock sums CardStock.
               for (const rowChunk of chunk(newRows, CHUNK_SIZE)) {
-                const created = await tx.card.createMany({ data: rowChunk });
+                const created = await tx.card.createMany({
+                  data: rowChunk.map((r: any) => ({ ...r, status: 'VERIFIED', validatedAt: validatedAt }))
+                });
                 count += created.count;
+
+                const inserted = await tx.card.findMany({
+                  where: { key: { in: rowChunk.map((r: any) => r.key) } },
+                  select: { id: true, checkpointCode: true }
+                });
+                await tx.cardMovement.createMany({
+                  data: inserted.map(c => ({
+                    cardID: c.id,
+                    type: 'INITIAL',
+                    userCode,
+                    sourceCode: null,
+                    targetCode: c.checkpointCode,
+                    createdAt: validatedAt
+                  }))
+                });
+                for (const c of inserted) {
+                  perCheckpoint.set(c.checkpointCode, (perCheckpoint.get(c.checkpointCode) ?? 0) + 1);
+                }
               }
               return { count };
             } else {
@@ -967,14 +1000,46 @@ class StockController {
 
         const totalCreated = result.reduce((sum, r) => sum + r.count, 0);
 
+        const newCardsCount = result[jsonData.findIndex(s => s.sheet === 'ICCID')]?.count ?? 0;
+
         if (batchID) {
-          const newCardsCount = result[jsonData.findIndex(s => s.sheet === 'ICCID')]?.count ?? 0;
           await tx.uploadBatch.update({
             where: { id: batch.id },
             data: { total: { increment: newCardsCount } }
           });
         } else if (totalCreated === 0) {
           await tx.uploadBatch.delete({ where: { id: batch.id } });
+        }
+
+        if (totalCreated > 0) {
+          // One aggregated snapshot per checkpoint, carried from that checkpoint's
+          // most recent amount.
+          for (const [checkpointCode, added] of perCheckpoint) {
+            const latest = await tx.cardStock.findFirst({
+              where: { checkpointCode },
+              orderBy: { id: 'desc' }
+            });
+            await tx.cardStock.create({
+              data: { checkpointCode, amount: Number(latest?.amount ?? 0) + added, createdAt: validatedAt }
+            });
+          }
+
+          if (newCardsCount > 0) {
+            const lastProgress = await tx.uploadBatchProgress.findFirst({
+              where: { batchCode: batch.code },
+              orderBy: { id: 'desc' }
+            });
+            await tx.uploadBatchProgress.create({
+              data: {
+                batchCode: batch.code,
+                progress: (lastProgress?.progress ?? 0) + newCardsCount,
+                createdAt: validatedAt
+              }
+            });
+          }
+
+          // Nothing is left to validate, so the batch is closed on arrival.
+          await tx.uploadBatch.update({ where: { id: batch.id }, data: { status: 'COMPLETED' } });
         }
 
         return { totalCreated, parsedTotal };
