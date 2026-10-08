@@ -30,6 +30,17 @@ const userSelect = {
 const generateUserCode = () =>
   `${Date.now()}`.slice(-10) + String(Math.floor(Math.random() * 1000)).padStart(3, '0');
 
+// A user code is what the person types to sign in: letters and digits only, any case
+// (stored upper-case, so two codes can never differ only by letter case)
+const USER_CODE_PATTERN = /^[A-Z0-9]{4,20}$/;
+const USER_CODE_HINT = 'Use 4-20 characters: letters and digits only';
+
+const normalizeUserCode = (value: unknown): string =>
+  typeof value === 'string' ? value.trim().toUpperCase() : '';
+
+const isUserCodeTaken = async (code: string) =>
+  !!(await prisma.user.findUnique({ where: { code }, select: { id: true } }));
+
 const cleanName = (value: unknown): string => {
   const name = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
   if (!name) throw httpError(400, 'name is required');
@@ -97,6 +108,42 @@ class UserAdminController {
         message: 'Accesses retrieved successfully',
         data: { accesses: all.filter((access) => !isRestrictedAccess(access.code)) }
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /** Live check while the admin types a code in the create form */
+  static async checkCode(req: Request, res: Response, next: NextFunction) {
+    try {
+      const code = normalizeUserCode(req.query.code);
+      if (!USER_CODE_PATTERN.test(code)) {
+        res.status(200).json({
+          message: 'Code checked',
+          data: { code, valid: false, available: false, reason: USER_CODE_HINT }
+        });
+        return;
+      }
+      res.status(200).json({
+        message: 'Code checked',
+        data: { code, valid: true, available: !(await isUserCodeTaken(code)) }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /** An unused generated code for the "Buat otomatis" button */
+  static async suggestCode(req: Request, res: Response, next: NextFunction) {
+    try {
+      for (let attempt = 0; attempt < CODE_ATTEMPTS; attempt++) {
+        const code = generateUserCode();
+        if (!(await isUserCodeTaken(code))) {
+          res.status(200).json({ message: 'Code suggested', data: { code } });
+          return;
+        }
+      }
+      throw httpError(503, 'Could not find a free code, try again');
     } catch (error) {
       next(error);
     }
@@ -226,9 +273,18 @@ class UserAdminController {
 
       const passwordHash = Bcrypt.hash(password);
 
+      // A code typed by the admin is used as is (and must be free); without one it is generated
+      const requestedCode = normalizeUserCode(req.body.code);
+      if (req.body.code !== undefined && req.body.code !== '' && !USER_CODE_PATTERN.test(requestedCode)) {
+        throw httpError(400, USER_CODE_HINT);
+      }
+      if (requestedCode && (await isUserCodeTaken(requestedCode))) {
+        throw httpError(409, 'This code is already used by another user');
+      }
+
       let user;
       for (let attempt = 1; !user; attempt++) {
-        const code = generateUserCode();
+        const code = requestedCode || generateUserCode();
         try {
           user = await prisma.$transaction(async (tx) => {
             const created = await tx.user.create({
@@ -245,6 +301,8 @@ class UserAdminController {
         } catch (error) {
           const isDuplicate =
             error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+          // Someone took the typed code between the check and the insert
+          if (isDuplicate && requestedCode) throw httpError(409, 'This code is already used by another user');
           if (!isDuplicate || attempt >= CODE_ATTEMPTS) throw error;
         }
       }
@@ -263,6 +321,11 @@ class UserAdminController {
       const code = String(req.params.code);
       const existing = await prisma.user.findUnique({ where: { code } });
       if (!existing) throw httpError(404, 'User not found');
+
+      // The code is the sign-in name and the key of every record of the user: never changed
+      if (req.body.code !== undefined && normalizeUserCode(req.body.code) !== existing.code.toUpperCase()) {
+        throw httpError(400, 'The code of a user cannot be changed');
+      }
 
       const { name, circleCode, accessCodes, password } = req.body;
       const data: Prisma.UserUpdateInput = {};
