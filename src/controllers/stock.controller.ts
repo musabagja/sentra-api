@@ -1,5 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
-import { wibEndOfDay, wibMonthStart, wibStartOfDay, wibToday } from '../utils/wib.util';
+import {
+  wibEndOfDay, wibMonthEnd, wibMonthIndex, wibMonthStart, wibStartOfDay, wibToday, wibYearEnd, wibYearStart, wibYmd
+} from '../utils/wib.util';
 import prisma from '../../lib/prisma';
 import * as xlsx from 'xlsx';
 
@@ -91,20 +93,18 @@ class StockController {
       const dcCode    = req.query.dcCode    as string | undefined;
       const storeCode = req.query.storeCode as string | undefined;
 
+      // The calendar is Jakarta's, whatever time zone the server runs in
       const now          = new Date();
-      const currentYear  = now.getFullYear();
-      const currentMonth = now.getMonth() + 1; // 1-indexed
+      const { year: currentYear, month: currentMonth } = wibYmd(now); // month is 1-indexed
 
       const year  = Number(req.query.year)  || currentYear;
       const month = Number(req.query.month) || currentMonth;
 
       // Cutoff: end of today when viewing the current month, otherwise last day of the requested month
       const isCurrentPeriod = year === currentYear && month === currentMonth;
-      const cutoff = isCurrentPeriod
-        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-        : new Date(year, month, 0, 23, 59, 59, 999); // day 0 of next month = last day of this month
+      const cutoff = isCurrentPeriod ? wibEndOfDay(now) : wibMonthEnd(year, month);
 
-      const yearStart = new Date(year, 0, 1);
+      const yearStart = wibYearStart(year);
 
       const scopeFilter = {
         status: 'DELIVERED' as const,
@@ -322,7 +322,7 @@ class StockController {
       const buildMonthlyTotals = (rows: { amount: number; createdAt: Date }[]) => {
         const months = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
         for (const row of rows) {
-          months[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
+          months[wibMonthIndex(row.createdAt)]!.amount += row.amount ?? 0;
         }
         return months;
       };
@@ -371,14 +371,12 @@ class StockController {
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
       const now         = new Date();
-      const currentYear = now.getFullYear();
+      const currentYear = wibYmd(now).year;
       const year        = Number(req.query.year) || currentYear;
 
-      const cutoff = year === currentYear
-        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-        : new Date(year, 11, 31, 23, 59, 59, 999);
+      const cutoff = year === currentYear ? wibEndOfDay(now) : wibYearEnd(year);
 
-      const yearStart = new Date(year, 0, 1);
+      const yearStart = wibYearStart(year);
 
       if (checkpointCode && !allowed.includes(checkpointCode)) {
         const err = new Error('Checkpoint not found');
@@ -405,7 +403,7 @@ class StockController {
 
       const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
       for (const row of rows) {
-        chart[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
+        chart[wibMonthIndex(row.createdAt)]!.amount += row.amount ?? 0;
       }
 
       res.status(200).json({
@@ -424,14 +422,12 @@ class StockController {
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
       const now         = new Date();
-      const currentYear = now.getFullYear();
+      const currentYear = wibYmd(now).year;
       const year        = Number(req.query.year) || currentYear;
 
-      const cutoff = year === currentYear
-        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-        : new Date(year, 11, 31, 23, 59, 59, 999);
+      const cutoff = year === currentYear ? wibEndOfDay(now) : wibYearEnd(year);
 
-      const yearStart = new Date(year, 0, 1);
+      const yearStart = wibYearStart(year);
 
       if (checkpointCode && !allowed.includes(checkpointCode)) {
         const err = new Error('Checkpoint not found');
@@ -458,7 +454,7 @@ class StockController {
 
       const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
       for (const row of rows) {
-        chart[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
+        chart[wibMonthIndex(row.createdAt)]!.amount += row.amount ?? 0;
       }
 
       res.status(200).json({
