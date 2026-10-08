@@ -158,6 +158,12 @@ class CheckpointController {
       }
 
       const { linkedCircleCodes, circles } = await validateCircleCodes(circleCodes, req.user!.circleCode);
+      // A new checkpoint is linked to the caller's own circle only; linking it into the circles of
+      // others is not theirs to do. Refused instead of silently dropped so the caller sees it.
+      const foreign = linkedCircleCodes.filter((c) => c !== req.user!.circleCode);
+      if (foreign.length > 0) {
+        throw httpError(403, `You can only add a checkpoint to your own circle (${req.user!.circleCode})`);
+      }
 
       // A code can be typed by the user; without one it is generated, as before
       const typedCode = req.body.code === undefined || req.body.code === '' ? null : normalizeCheckpointCode(req.body.code);
@@ -360,37 +366,38 @@ class CheckpointController {
         throw err;
       }
 
-      const regions = circleCodes !== undefined ? await validateCircleCodes(circleCodes, req.user!.circleCode) : null;
-
-      const checkpoint = await prisma.$transaction(async (tx) => {
-        const updated = await tx.checkpoint.update({
-          where: { id: existing.id },
-          data: { ...(trimmedName && { name: trimmedName }) }
+      // The caller may only touch their own circle's link. Links to other circles stay exactly as
+      // they are: they can't be added here, and sending a list without them doesn't remove them.
+      // The caller's own link exists already (that is how they reach the checkpoint) and must
+      // stay (an unlinked checkpoint would drop out of their list).
+      if (circleCodes !== undefined) {
+        const { linkedCircleCodes } = await validateCircleCodes(circleCodes, req.user!.circleCode);
+        const current = await prisma.checkpointCircle.findMany({
+          where: { checkpointCode: existing.code },
+          select: { circleCode: true }
         });
-
-        if (regions) {
-          await tx.checkpointCircle.deleteMany({
-            where: {
-              checkpointCode: existing.code,
-              circleCode: { notIn: regions.linkedCircleCodes }
-            }
-          });
-          const current = await tx.checkpointCircle.findMany({
-            where: { checkpointCode: existing.code },
-            select: { circleCode: true }
-          });
-          const toAdd = regions.linkedCircleCodes.filter(
-            (code) => !current.some((link) => link.circleCode === code)
-          );
-          if (toAdd.length > 0) {
-            await tx.checkpointCircle.createMany({
-              data: toAdd.map((circleCode) => ({ checkpointCode: existing.code, circleCode }))
-            });
-          }
+        const added = linkedCircleCodes.filter(
+          (c) => c !== req.user!.circleCode && !current.some((link) => link.circleCode === c)
+        );
+        if (added.length > 0) {
+          throw httpError(403, `You cannot link this checkpoint to other circles: ${added.join(', ')}`);
         }
+      }
 
-        return updated;
+      const checkpoint = await prisma.checkpoint.update({
+        where: { id: existing.id },
+        data: { ...(trimmedName && { name: trimmedName }) }
       });
+
+      const regions =
+        circleCodes !== undefined
+          ? {
+              circles: await prisma.circle.findMany({
+                where: { checkpointCircles: { some: { checkpointCode: existing.code } } },
+                select: { code: true, name: true }
+              })
+            }
+          : null;
 
       res.status(200).json({
         message: 'Checkpoint updated successfully',
