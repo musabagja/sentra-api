@@ -1,4 +1,5 @@
 import { checkpointInCircle } from './access.util';
+import { wibEndOfDay, wibStartOfDay } from './wib.util';
 
 /**
  * Filters shared by the list endpoints and the Excel exports, so the rows a person
@@ -44,9 +45,6 @@ export const csvParam = (
   return unique;
 };
 
-const startOfDay = (value: string) => new Date(new Date(value).setHours(0, 0, 0, 0));
-const endOfDay = (value: string) => new Date(new Date(value).setHours(23, 59, 59, 999));
-
 /** Checkpoints of the caller's circle, optionally narrowed to some codes */
 const scopedCheckpoint = (circleCode: string, codes: string[]) =>
   codes.length ? { AND: [checkpointInCircle(circleCode), { code: { in: codes } }] } : checkpointInCircle(circleCode);
@@ -71,16 +69,16 @@ export const buildCardWhere = (query: any, circleCode: string) => {
   }
   if (validatedAt) {
     where.validatedAt = {
-      gte: new Date(`${validatedAt}T00:00:00.000Z`),
-      lt: new Date(`${validatedAt}T23:59:59.999Z`)
+      gte: wibStartOfDay(String(validatedAt)),
+      lte: wibEndOfDay(String(validatedAt))
     };
   }
   if (uploadAt || batches.length) {
     where.uploadBatch = {
       ...(uploadAt && {
         createdAt: {
-          gte: new Date(`${uploadAt}T00:00:00.000Z`),
-          lt: new Date(`${uploadAt}T23:59:59.999Z`)
+          gte: wibStartOfDay(String(uploadAt)),
+          lte: wibEndOfDay(String(uploadAt))
         }
       }),
       ...(batches.length && containsAny('code', batches))
@@ -103,10 +101,12 @@ export const buildNumberWhere = (query: any, circleCode: string) => {
     AND: [{ OR: [{ checkpoint: scopedCheckpoint(circleCode, codes) }, { checkpointCode: null }] }]
   };
   if (statuses.length) where.status = statuses.length === 1 ? statuses[0] : { in: statuses };
+  // Both conditions go into AND: each of them can be an OR of its own, and two ORs cannot
+  // share one `where.OR` key
   if (search) {
-    where.OR = [{ key: { contains: search as string } }, { name: { contains: search as string } }];
+    where.AND.push({ OR: [{ key: { contains: search as string } }, { name: { contains: search as string } }] });
   }
-  if (remarks.length) Object.assign(where, containsAny('remark', remarks));
+  if (remarks.length) where.AND.push(containsAny('remark', remarks));
   return where;
 };
 
@@ -129,9 +129,9 @@ export const buildDistributionWhere = (query: any, circleCode: string) => {
   if (startDueDate || endDueDate) {
     and.push({
       scheduledAt: {
-        ...(startDueDate && { gte: startOfDay(startDueDate as string) }),
+        ...(startDueDate && { gte: wibStartOfDay(String(startDueDate)) }),
         // The whole end day counts: a schedule at 14:00 on the end date is still in range
-        ...(endDueDate && { lte: endOfDay(endDueDate as string) })
+        ...(endDueDate && { lte: wibEndOfDay(String(endDueDate)) })
       }
     });
   }
@@ -163,8 +163,8 @@ export const buildSoldRange = (query: any) => {
   const { startSoldAt, endSoldAt } = query;
   if (!startSoldAt && !endSoldAt) return undefined;
   return {
-    ...(startSoldAt && { gte: startOfDay(String(startSoldAt)) }),
-    ...(endSoldAt && { lte: endOfDay(String(endSoldAt)) })
+    ...(startSoldAt && { gte: wibStartOfDay(String(startSoldAt)) }),
+    ...(endSoldAt && { lte: wibEndOfDay(String(endSoldAt)) })
   };
 };
 

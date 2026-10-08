@@ -1,11 +1,11 @@
 import type { Response } from 'express';
 import ExcelJS from 'exceljs';
+import { WIB_OFFSET_MS } from './wib.util';
 
 /** Excel allows 1,048,576 rows per sheet, one is the header */
 export const MAX_EXPORT_ROWS = 1_000_000;
 
 // Jakarta is UTC+7. Excel dates carry no time zone, so shift them to show local time.
-const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
 export const wib = (value: Date | string | null | undefined): Date | null =>
   value ? new Date(new Date(value).getTime() + WIB_OFFSET_MS) : null;
 

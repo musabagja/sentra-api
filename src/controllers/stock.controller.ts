@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { wibEndOfDay, wibMonthStart, wibStartOfDay, wibToday } from '../utils/wib.util';
 import prisma from '../../lib/prisma';
 import * as xlsx from 'xlsx';
 
@@ -699,13 +700,33 @@ class StockController {
           cards: {
             select: { key: true, id: true, status: true, checkpointCode: true }
           },
-          numbers: { select: { key: true, id: true, status: true } }
+          numbers: { select: { key: true, id: true, status: true, checkpointCode: true } }
         }
       });
 
       if (!batch) {
         const err = new Error('Batch not found');
         (err as any).status = 404;
+        throw err;
+      }
+
+      // Deleting removes everything in the batch, so all of it must belong to the caller's circle.
+      // A batch that only carries MSISDNs is visible to everyone (numbers without a checkpoint are
+      // shared stock) and is therefore not the caller's to delete; neither is one that holds cards
+      // or numbers of another circle.
+      const mine = new Set(req.checkpointCodes ?? []);
+      if (batch.cards.length === 0) {
+        const err = new Error('Cannot delete a batch that has no ICCID: it is not tied to your circle');
+        (err as any).status = 403;
+        throw err;
+      }
+      const foreignCards = batch.cards.filter(c => !mine.has(c.checkpointCode)).length;
+      const foreignNumbers = batch.numbers.filter(n => n.checkpointCode && !mine.has(n.checkpointCode)).length;
+      if (foreignCards > 0 || foreignNumbers > 0) {
+        const err = new Error(
+          `Cannot delete batch: ${foreignCards + foreignNumbers} item(s) belong to another circle`
+        );
+        (err as any).status = 403;
         throw err;
       }
 
@@ -2197,13 +2218,13 @@ class StockController {
         prisma.merge.count({
           where: {
             ...mergeAmountWhere,
-            createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
+            createdAt: { gte: wibMonthStart() }
           }
         }),
         prisma.merge.count({
           where: {
             ...mergeAmountWhere,
-            createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }
+            createdAt: { gte: wibToday() }
           }
         })
       ]);
@@ -2366,13 +2387,13 @@ class StockController {
       };
       if (startSoldAt) {
         where.createdAt = {
-          gte: new Date(new Date(startSoldAt as string).setHours(0, 0, 0, 0))
+          gte: wibStartOfDay(String(startSoldAt))
         }
       }
       if (endSoldAt) {
         where.createdAt = {
           ...where.createdAt,
-          lte: new Date(new Date(endSoldAt as string).setHours(23, 59, 59, 999))
+          lte: wibEndOfDay(String(endSoldAt))
         }
       }
       const isSimcardQuery = type === "SIMCARD" || !type;
@@ -2405,8 +2426,8 @@ class StockController {
         });
       }
       const baseCountWhere = { checkpoint: checkpointInCircle(circleCode) };
-      const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-      const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+      const monthStart = wibMonthStart();
+      const dayStart = wibToday();
 
       const [total, monthly, daily] = isSimcardQuery
         ? await Promise.all([

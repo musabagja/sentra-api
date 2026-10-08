@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { wibEndOfDay, wibStartOfDay } from '../utils/wib.util';
 import { buildPlaceWhere } from '../utils/list-filters.util';
 import prisma from '../../lib/prisma';
 import { Prisma } from '../../generated/prisma/client';
@@ -67,9 +68,10 @@ const badRequest = (message: string) => {
 
 /**
  * Validates a list of circle codes: a non-empty string array (a checkpoint with
- * no circle would be visible to no one) whose codes all exist.
+ * no circle would be visible to no one) whose codes all exist and that includes the
+ * caller's own circle.
  */
-const validateCircleCodes = async (circleCodes: unknown) => {
+const validateCircleCodes = async (circleCodes: unknown, callerCircle: string) => {
   if (!Array.isArray(circleCodes) || circleCodes.some((c) => typeof c !== 'string')) {
     throw badRequest('circleCodes must be an array of circle codes');
   }
@@ -77,6 +79,14 @@ const validateCircleCodes = async (circleCodes: unknown) => {
   const linkedCircleCodes: string[] = [...new Set(circleCodes as string[])];
   if (linkedCircleCodes.length === 0) {
     throw badRequest('Select at least one region');
+  }
+
+  // Access follows the circle: a checkpoint that leaves the caller's own circle would drop out of
+  // their list (and out of their reach), and linking it into the circles of others is not theirs to do
+  if (!linkedCircleCodes.includes(callerCircle)) {
+    const err = new Error(`The checkpoint must stay in your own circle (${callerCircle})`);
+    (err as any).status = 403;
+    throw err;
   }
 
   const circles = await prisma.circle.findMany({
@@ -147,7 +157,7 @@ class CheckpointController {
         throw err;
       }
 
-      const { linkedCircleCodes, circles } = await validateCircleCodes(circleCodes);
+      const { linkedCircleCodes, circles } = await validateCircleCodes(circleCodes, req.user!.circleCode);
 
       // A code can be typed by the user; without one it is generated, as before
       const typedCode = req.body.code === undefined || req.body.code === '' ? null : normalizeCheckpointCode(req.body.code);
@@ -207,13 +217,13 @@ class CheckpointController {
       const mergesWhere: any = {};
       if (startSoldAt) {
         mergesWhere.createdAt = {
-          gte: new Date(new Date(startSoldAt as string).setHours(0, 0, 0, 0))
+          gte: wibStartOfDay(String(startSoldAt))
         };
       }
       if (endSoldAt) {
         mergesWhere.createdAt = {
           ...(mergesWhere.createdAt || {}),
-          lte: new Date(new Date(endSoldAt as string).setHours(23, 59, 59, 999))
+          lte: wibEndOfDay(String(endSoldAt))
         };
       }
 
@@ -350,7 +360,7 @@ class CheckpointController {
         throw err;
       }
 
-      const regions = circleCodes !== undefined ? await validateCircleCodes(circleCodes) : null;
+      const regions = circleCodes !== undefined ? await validateCircleCodes(circleCodes, req.user!.circleCode) : null;
 
       const checkpoint = await prisma.$transaction(async (tx) => {
         const updated = await tx.checkpoint.update({
