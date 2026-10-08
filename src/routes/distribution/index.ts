@@ -2,7 +2,7 @@ import express from 'express';
 import DistributionController from '../../controllers/distribution.controller';
 import ExportController from '../../controllers/export.controller';
 import Permissions from '../../middlewares/permission.handler';
-import { DOWNLOAD_ACCESS } from '../../utils/access.util';
+import { ALL_CIRCLES_ACCESS, DISTRIBUTION_ACCESS, DOWNLOAD_ACCESS } from '../../utils/access.util';
 import upload, { generateImageURLs } from '../../utils/multer.config';
 const router = express.Router();
 
@@ -13,11 +13,23 @@ const router = express.Router();
 // POST /api/distribution - Create a new distribution
 router.post('/', DistributionController.createDistribution);
 
+// POST /api/distribution/upload/xlsx - Kirim via Excel: one file (ICCID, TARGET, TANGGAL_KIRIM) makes several batches.
+// Needs the access SB04, or the super-admin access SA01.
+router.post(
+  '/upload/xlsx',
+  Permissions.requireAny(DISTRIBUTION_ACCESS.SEND_EXCEL, ALL_CIRCLES_ACCESS),
+  upload('xlsx').single('source'),
+  DistributionController.uploadDistributionExcel
+);
+
 // GET /api/distribution/export - Excel of the distributions (must stay before /:id)
 router.get('/export', Permissions.require(DOWNLOAD_ACCESS.STOCK), ExportController.distributions);
 
 // GET /api/distribution - Get all distributions with pagination and filtering
 router.get('/', DistributionController.getDistributions);
+
+// GET /api/distribution/:id/items - The cards of a distribution, paged and searchable
+router.get('/:id/items', DistributionController.getDistributionItems);
 
 // GET /api/distribution/:id - Get a specific distribution by ID
 router.get('/:id', DistributionController.getDistribution);

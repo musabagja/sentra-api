@@ -17,7 +17,7 @@ const xlsxFilter = (req: any, file: any, cb: any) => {
   if (allowedMimes.includes(file.mimetype) || extname) {
     cb(null, true);
   } else {
-    cb(new Error('Only .xlsx files are allowed'), false);
+    cb(new Error('Hanya file .xlsx yang dapat diunggah'), false);
   }
 };
 

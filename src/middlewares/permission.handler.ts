@@ -25,6 +25,30 @@ class Permissions {
       }
     };
   }
+
+  /**
+   * Like require, but any one of the access codes is enough (for a feature that has its own access
+   * and is also open to a broader one, such as the super-admin access).
+   */
+  static requireAny(...accessCodes: string[]) {
+    return async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const permission = await prisma.permission.findFirst({
+          where: { userCode: req.user!.code, accessCode: { in: accessCodes }, status: true }
+        });
+
+        if (!permission) {
+          const err = new Error('Anda tidak punya akses untuk melakukan tindakan ini');
+          (err as any).status = 403;
+          throw err;
+        }
+
+        next();
+      } catch (error) {
+        next(error);
+      }
+    };
+  }
 }
 
 export default Permissions;
