@@ -36,7 +36,7 @@ class CircleController {
       const name = typeof req.body.name === 'string' ? req.body.name.trim().replace(/\s+/g, ' ') : '';
 
       if (!name) {
-        const err = new Error('name is required');
+        const err = new Error('Nama wajib diisi');
         (err as any).status = 400;
         throw err;
       }
@@ -46,7 +46,7 @@ class CircleController {
 
       const existing = await prisma.circle.findUnique({ where: { code } });
       if (existing) {
-        const err = new Error(`${existing.name} already exists`);
+        const err = new Error(`${existing.name} sudah ada`);
         (err as any).status = 409;
         throw err;
       }

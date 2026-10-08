@@ -379,7 +379,7 @@ class StockController {
       const yearStart = wibYearStart(year);
 
       if (checkpointCode && !allowed.includes(checkpointCode)) {
-        const err = new Error('Checkpoint not found');
+        const err = new Error('Checkpoint tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -430,7 +430,7 @@ class StockController {
       const yearStart = wibYearStart(year);
 
       if (checkpointCode && !allowed.includes(checkpointCode)) {
-        const err = new Error('Checkpoint not found');
+        const err = new Error('Checkpoint tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -477,7 +477,7 @@ class StockController {
       });
 
       if (!batch) {
-        const err = new Error('Batch not found');
+        const err = new Error('Batch tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -509,7 +509,7 @@ class StockController {
       const circleCode = circleScope(req);
 
       if (type !== 'cards' && type !== 'numbers') {
-        const err = new Error("type must be 'cards' or 'numbers'");
+        const err = new Error("Parameter type harus 'cards' atau 'numbers'");
         (err as any).status = 422;
         throw err;
       }
@@ -521,7 +521,7 @@ class StockController {
         select: { code: true }
       });
       if (!batch) {
-        const err = new Error('Batch not found');
+        const err = new Error('Batch tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -581,7 +581,7 @@ class StockController {
       const allowedStatus = ['ONGOING', 'COMPLETED'];
 
       if (status && !allowedStatus.includes(status as string)) {
-        const err = new Error('Invalid status');
+        const err = new Error('Status tidak valid');
         (err as any).status = 400;
         throw err;
       }
@@ -645,13 +645,13 @@ class StockController {
         });
 
         if (!currentBatch) {
-          const err = new Error('Batch not found');
+          const err = new Error('Batch tidak ditemukan');
           (err as any).status = 404;
           throw err;
         }
 
         if (currentBatch.status === 'COMPLETED') {
-          const err = new Error('Batch is already completed');
+          const err = new Error('Batch ini sudah selesai diverifikasi');
           (err as any).status = 400;
           throw err;
         }
@@ -701,7 +701,7 @@ class StockController {
       });
 
       if (!batch) {
-        const err = new Error('Batch not found');
+        const err = new Error('Batch tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -711,24 +711,27 @@ class StockController {
       // shared stock) and is therefore not the caller's to delete; neither is one that holds cards
       // or numbers of another circle.
       // (A holder of the all-circles access owns every circle, so none of this applies to them.)
-      const mine = new Set(req.checkpointCodes ?? []);
+      // Codes are compared ignoring letter case, like the database does (a card may carry "Andalas07"
+      // where the checkpoint is "ANDALAS07")
+      const mine = new Set((req.checkpointCodes ?? []).map((c) => c.toUpperCase()));
+      const isMine = (code: string | null) => !!code && mine.has(code.toUpperCase());
       if (!req.allCircles && batch.cards.length === 0) {
-        const err = new Error('Cannot delete a batch that has no ICCID: it is not tied to your circle');
+        const err = new Error('Batch yang tidak berisi ICCID tidak dapat dihapus karena tidak terkait dengan circle Anda');
         (err as any).status = 403;
         throw err;
       }
-      const foreignCards = batch.cards.filter(c => !mine.has(c.checkpointCode)).length;
-      const foreignNumbers = batch.numbers.filter(n => n.checkpointCode && !mine.has(n.checkpointCode)).length;
+      const foreignCards = batch.cards.filter(c => !isMine(c.checkpointCode)).length;
+      const foreignNumbers = batch.numbers.filter(n => n.checkpointCode && !isMine(n.checkpointCode)).length;
       if (!req.allCircles && (foreignCards > 0 || foreignNumbers > 0)) {
         const err = new Error(
-          `Cannot delete batch: ${foreignCards + foreignNumbers} item(s) belong to another circle`
+          `Batch tidak dapat dihapus: ${foreignCards + foreignNumbers} item milik circle lain`
         );
         (err as any).status = 403;
         throw err;
       }
 
       if (batch.status === 'COMPLETED') {
-        const err = new Error('Cannot delete a completed batch');
+        const err = new Error('Batch yang sudah selesai tidak dapat dihapus');
         (err as any).status = 400;
         throw err;
       }
@@ -738,7 +741,7 @@ class StockController {
 
       if (invalidCards.length > 0) {
         const invalidStatusList = [...new Set(invalidCards.map(c => c.status))].join(', ');
-        const err = new Error(`Cannot delete batch: ${invalidCards.length} card(s) have status (${invalidStatusList}) that cannot be deleted`);
+        const err = new Error(`Batch tidak dapat dihapus: ${invalidCards.length} kartu berstatus (${invalidStatusList}) sehingga tidak dapat dihapus`);
         (err as any).status = 400;
         throw err;
       }
@@ -746,7 +749,7 @@ class StockController {
       // A number that has already been sold is tied to a sale record and must not vanish with its batch
       const invalidNumbers = batch.numbers.filter(n => n.status === 'SOLD');
       if (invalidNumbers.length > 0) {
-        const err = new Error(`Cannot delete batch: ${invalidNumbers.length} number(s) have already been sold`);
+        const err = new Error(`Batch tidak dapat dihapus: ${invalidNumbers.length} nomor sudah terjual`);
         (err as any).status = 400;
         throw err;
       }
@@ -921,11 +924,11 @@ class StockController {
       const file = (req as any).file;
 
       if (!req.user) {
-        throw new Error('User not found');
+        throw new Error('User tidak ditemukan');
       }
 
       if (!file) {
-        const err = new Error('No file uploaded');
+        const err = new Error('Belum ada file yang diunggah');
         (err as any).status = 400;
         throw err;
       }
@@ -934,14 +937,14 @@ class StockController {
       const workbook = xlsx.read(file.buffer, { type: 'buffer' });
 
       if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-        const err = new Error('Excel file has no sheets');
+        const err = new Error('File Excel tidak memiliki sheet');
         (err as any).status = 422;
         throw err;
       }
 
       const firstWorksheet = workbook.Sheets[workbook.SheetNames[0]!];
       if (!firstWorksheet) {
-        const err = new Error('Worksheet not found');
+        const err = new Error('Sheet tidak ditemukan');
         (err as any).status = 422;
         throw err;
       }
@@ -957,7 +960,7 @@ class StockController {
 
       if (parsedSheets.length === 0) {
         const err = new Error(
-          `The file has no sheet named ICCID or MSISDN (found: ${workbook.SheetNames.join(', ')}). Download the template and keep its sheet names.`
+          `File tidak memiliki sheet bernama ICCID atau MSISDN (ditemukan: ${workbook.SheetNames.join(', ')}). Unduh template dan pertahankan nama sheet-nya.`
         );
         (err as any).status = 422;
         throw err;
@@ -1039,12 +1042,12 @@ class StockController {
         if (batchID) {
           const existing = await tx.uploadBatch.findUnique({ where: { id: Number(batchID) } });
           if (!existing) {
-            const err = new Error(`Batch ${batchID} not found`);
+            const err = new Error(`Batch ${batchID} tidak ditemukan`);
             (err as any).status = 404;
             throw err;
           }
           if (existing.status === 'COMPLETED') {
-            const err = new Error(`Batch ${batchID} is already completed`);
+            const err = new Error(`Batch ${batchID} sudah selesai`);
             (err as any).status = 409;
             throw err;
           }
@@ -1225,7 +1228,7 @@ class StockController {
       const file = (req as any).file;
 
       if (!file) {
-        const err = new Error('No file uploaded');
+        const err = new Error('Belum ada file yang diunggah');
         (err as any).status = 400;
         throw err;
       }
@@ -1233,7 +1236,7 @@ class StockController {
       const workbook = xlsx.read(file.buffer, { type: 'buffer' });
       const sheet = workbook.Sheets[workbook.SheetNames[0]!];
       if (!sheet) {
-        const err = new Error('Excel file has no sheets');
+        const err = new Error('File Excel tidak memiliki sheet');
         (err as any).status = 422;
         throw err;
       }
@@ -1249,19 +1252,19 @@ class StockController {
         try {
           parsedNotes = JSON.parse(String(rawNotes));
         } catch {
-          const err = new Error('notes must be a JSON object of { ICCID: note }');
+          const err = new Error('Format catatan tidak valid: harus berupa objek JSON { ICCID: catatan }');
           (err as any).status = 422;
           throw err;
         }
         if (!parsedNotes || typeof parsedNotes !== 'object' || Array.isArray(parsedNotes)) {
-          const err = new Error('notes must be a JSON object of { ICCID: note }');
+          const err = new Error('Format catatan tidak valid: harus berupa objek JSON { ICCID: catatan }');
           (err as any).status = 422;
           throw err;
         }
         for (const [iccid, value] of Object.entries(parsedNotes as Record<string, unknown>)) {
           const text = typeof value === 'string' ? value.trim() : '';
           if (text.length > MAX_NOTE_LENGTH) {
-            const err = new Error(`The note for ICCID ${iccid} is longer than ${MAX_NOTE_LENGTH} characters`);
+            const err = new Error(`Catatan untuk ICCID ${iccid} lebih dari ${MAX_NOTE_LENGTH} karakter`);
             (err as any).status = 422;
             throw err;
           }
@@ -1283,14 +1286,14 @@ class StockController {
         const trn        = String(r.TRN ?? r.trn ?? '').trim();
         if (iccidCell.unreadable) {
           unreadableIccid.push({ row, iccid: iccidCell.key, storeCode,
-            detail: 'Excel saved this ICCID as a number, so its digits are already lost' });
+            detail: 'Excel menyimpan ICCID ini sebagai angka, sehingga digitnya sudah berubah' });
           continue;
         }
         const iccid = iccidCell.key;
         if (!iccid) continue;
         const firstRow = seen.get(iccid);
         if (firstRow) {
-          duplicateInFile.push({ row, iccid, storeCode, detail: `same ICCID already on row ${firstRow}` });
+          duplicateInFile.push({ row, iccid, storeCode, detail: `ICCID yang sama sudah ada di baris ${firstRow}` });
           continue;
         }
         seen.set(iccid, row);
@@ -1298,13 +1301,13 @@ class StockController {
       }
 
       if (parsed.length === 0 && unreadableIccid.length === 0) {
-        const err = new Error('No ICCID values found in the file');
+        const err = new Error('Tidak ada nomor ICCID di dalam file');
         (err as any).status = 422;
         throw err;
       }
 
       if (!req.user) {
-        const err = new Error('User not found');
+        const err = new Error('User tidak ditemukan');
         (err as any).status = 401;
         throw err;
       }
@@ -1386,34 +1389,34 @@ class StockController {
         const issue = { row: row.row, iccid: row.iccid, msisdn: row.msisdn, storeCode: row.storeCode };
 
         if (row.storeCode && !hasCheckpointAccess(row.storeCode, allowed)) {
-          storeNotAccessible.push({ ...issue, detail: `store ${row.storeCode} is not a checkpoint you can access` });
+          storeNotAccessible.push({ ...issue, detail: `toko ${row.storeCode} bukan checkpoint yang dapat Anda akses` });
           continue;
         }
 
         if (merge) {
           // ---- Verify path: unchanged reconciliation rules ----
           if (row.msisdn && merge.numberKey !== row.msisdn) {
-            mismatched.push({ ...issue, detail: `this ICCID is merged with ${merge.numberKey}, not ${row.msisdn}` });
+            mismatched.push({ ...issue, detail: `ICCID ini dipasangkan dengan ${merge.numberKey}, bukan ${row.msisdn}` });
             continue;
           }
           if (row.storeCode && merge.checkpointCode !== row.storeCode) {
-            checkpointMismatch.push({ ...issue, detail: `the recorded sale was at ${merge.checkpointCode ?? 'unknown'}, not ${row.storeCode}` });
+            checkpointMismatch.push({ ...issue, detail: `penjualan tercatat di ${merge.checkpointCode ?? 'lokasi tidak diketahui'}, bukan ${row.storeCode}` });
             continue;
           }
           if (!merge.soldAt) {
-            noSoldAt.push({ ...issue, detail: 'the merge record has no sale date' }); continue;
+            noSoldAt.push({ ...issue, detail: 'data penjualan tidak punya tanggal' }); continue;
           }
           if (!card || card.status !== 'SOLD') {
-            notSoldStatus.push({ ...issue, detail: `card status is ${card?.status ?? 'unknown'}, expected SOLD` }); continue;
+            notSoldStatus.push({ ...issue, detail: `status kartu ${card?.status ?? 'tidak diketahui'}, seharusnya SOLD` }); continue;
           }
 
           const number = numberMap.get(merge.numberKey);
           if (!number || number.status !== 'SOLD') {
-            numberNotSold.push({ ...issue, detail: `MSISDN ${merge.numberKey} status is ${number?.status ?? 'not found'}, expected SOLD` });
+            numberNotSold.push({ ...issue, detail: `status MSISDN ${merge.numberKey} ${number?.status ?? 'tidak ditemukan'}, seharusnya SOLD` });
             continue;
           }
           if (!card.validatedAt) {
-            neverValidated.push({ ...issue, detail: 'card was never validated into stock' }); continue;
+            neverValidated.push({ ...issue, detail: 'kartu belum pernah diverifikasi ke dalam stok' }); continue;
           }
 
           toVerify.push(row.iccid);
@@ -1424,50 +1427,50 @@ class StockController {
 
         // Cards are never auto-created: the physical card must already be in stock.
         if (!card) {
-          cardNotFound.push({ ...issue, detail: 'this ICCID does not exist in the system' }); continue;
+          cardNotFound.push({ ...issue, detail: 'ICCID ini tidak ada di sistem' }); continue;
         }
         if (card.status !== 'VERIFIED') {
-          cardNotVerified.push({ ...issue, detail: `card status is ${card.status}; it must be VERIFIED before it can be sold` });
+          cardNotVerified.push({ ...issue, detail: `status kartu ${card.status}; harus VERIFIED sebelum dapat dijual` });
           continue;
         }
         if (!card.validatedAt) {
-          neverValidated.push({ ...issue, detail: 'card was never validated into stock' }); continue;
+          neverValidated.push({ ...issue, detail: 'kartu belum pernah diverifikasi ke dalam stok' }); continue;
         }
         if (!row.storeCode) {
-          storeCodeMissing.push({ ...issue, detail: 'STORE_CODE is empty' }); continue;
+          storeCodeMissing.push({ ...issue, detail: 'STORE_CODE kosong' }); continue;
         }
         // Sold somewhere other than where the card is held: allowed only with a note for that card.
         const crossLocation = card.checkpointCode !== row.storeCode;
         if (crossLocation) {
           if (!hasCheckpointAccess(card.checkpointCode, allowed)) {
-            storeNotAccessible.push({ ...issue, detail: `the card is held at ${card.checkpointCode}, which is not a checkpoint you can access` });
+            storeNotAccessible.push({ ...issue, detail: `kartu berada di ${card.checkpointCode}, yang bukan checkpoint yang dapat Anda akses` });
             continue;
           }
           if (!notes.has(row.iccid)) {
-            cardCheckpointMismatch.push({ ...issue, fromCode: card.checkpointCode, detail: `card is currently held at ${card.checkpointCode}, not ${row.storeCode}; add a note to sell it from ${row.storeCode}` });
+            cardCheckpointMismatch.push({ ...issue, fromCode: card.checkpointCode, detail: `kartu saat ini berada di ${card.checkpointCode}, bukan ${row.storeCode}; tambahkan catatan untuk menjualnya dari ${row.storeCode}` });
             continue;
           }
         }
         if (!row.msisdn) {
-          msisdnMissing.push({ ...issue, detail: 'MSISDN is empty' }); continue;
+          msisdnMissing.push({ ...issue, detail: 'MSISDN kosong' }); continue;
         }
 
         const firstUse = msisdnSeen.get(row.msisdn);
         if (firstUse) {
-          duplicateMsisdn.push({ ...issue, detail: `MSISDN ${row.msisdn} is already used by ICCID ${firstUse}` });
+          duplicateMsisdn.push({ ...issue, detail: `MSISDN ${row.msisdn} sudah dipakai oleh ICCID ${firstUse}` });
           continue;
         }
 
         const boundMerge = mergeNumberMap.get(row.msisdn);
         if (boundMerge) {
-          numberBoundToOtherCard.push({ ...issue, detail: `MSISDN ${row.msisdn} is already merged with ${boundMerge.cardKey}` });
+          numberBoundToOtherCard.push({ ...issue, detail: `MSISDN ${row.msisdn} sudah dipasangkan dengan ${boundMerge.cardKey}` });
           continue;
         }
 
         // Numbers, unlike cards, are auto-created when absent.
         const number = numberMap.get(row.msisdn);
         if (number && number.status === 'SOLD') {
-          numberAlreadySold.push({ ...issue, detail: `MSISDN ${row.msisdn} is already marked SOLD` }); continue;
+          numberAlreadySold.push({ ...issue, detail: `MSISDN ${row.msisdn} sudah berstatus SOLD` }); continue;
         }
 
         msisdnSeen.set(row.msisdn, row.iccid);
@@ -1502,7 +1505,7 @@ class StockController {
               row: anchor?.row ?? 0,
               iccid: anchor?.iccid ?? '',
               storeCode: code,
-              detail: `${code} has ${amount} card(s) in stock but this file sells ${needed} from it`
+              detail: `${code} punya ${amount} kartu di stok, tetapi file ini menjual ${needed} kartu darinya`
             });
           } else {
             stockPlan.push({ checkpointCode: code, nextAmount: amount - needed });
@@ -1513,59 +1516,59 @@ class StockController {
       // Each bucket states the problem and the fix, so the person who uploaded the file
       // can correct it and retry without needing anyone to interpret the response.
       const buckets: { code: string; label: string; action: string; items: RowIssue[] }[] = [
-        { code: 'unreadableIccid', label: 'ICCID was saved as a number by Excel',
-          action: 'Format the ICCID column as Text, re-enter those ICCIDs, and export again.',
+        { code: 'unreadableIccid', label: 'ICCID disimpan Excel sebagai angka',
+          action: 'Ubah format kolom ICCID menjadi Teks, ketik ulang ICCID tersebut, lalu ekspor lagi.',
           items: unreadableIccid },
-        { code: 'duplicateIccid', label: 'The same ICCID appears more than once',
-          action: 'Delete the duplicate rows, keeping one row per ICCID.',
+        { code: 'duplicateIccid', label: 'ICCID yang sama muncul lebih dari sekali',
+          action: 'Hapus baris duplikat, sisakan satu baris per ICCID.',
           items: duplicateInFile },
-        { code: 'cardNotFound', label: 'ICCID is not in the system',
-          action: 'Check the ICCID for typos, or upload its stock batch first.',
+        { code: 'cardNotFound', label: 'ICCID tidak ada di sistem',
+          action: 'Periksa kembali ICCID (mungkin salah ketik), atau unggah batch stoknya terlebih dahulu.',
           items: cardNotFound },
-        { code: 'storeNotAccessible', label: 'STORE_CODE is not a store you can access',
-          action: 'Correct STORE_CODE to a store in your circle.',
+        { code: 'storeNotAccessible', label: 'STORE_CODE bukan toko yang dapat Anda akses',
+          action: 'Ganti STORE_CODE dengan toko di circle Anda.',
           items: storeNotAccessible },
-        { code: 'storeCodeMissing', label: 'STORE_CODE is empty',
-          action: 'Fill in the store where the card was sold.',
+        { code: 'storeCodeMissing', label: 'STORE_CODE kosong',
+          action: 'Isi toko tempat kartu dijual.',
           items: storeCodeMissing },
-        { code: 'msisdnMissing', label: 'MSISDN is empty',
-          action: 'Fill in the MSISDN that was sold with this ICCID.',
+        { code: 'msisdnMissing', label: 'MSISDN kosong',
+          action: 'Isi MSISDN yang terjual bersama ICCID ini.',
           items: msisdnMissing },
-        { code: 'cardNotVerified', label: 'Card has not been validated into stock',
-          action: 'Validate the card at its checkpoint, then upload again.',
+        { code: 'cardNotVerified', label: 'Kartu belum diverifikasi ke dalam stok',
+          action: 'Verifikasi kartu di checkpoint-nya, lalu unggah lagi.',
           items: cardNotVerified },
-        { code: 'neverValidated', label: 'Card was never physically validated',
-          action: 'Validate the card at its checkpoint, then upload again.',
+        { code: 'neverValidated', label: 'Kartu belum pernah diverifikasi secara fisik',
+          action: 'Verifikasi kartu di checkpoint-nya, lalu unggah lagi.',
           items: neverValidated },
-        { code: 'cardCheckpointMismatch', label: 'Card is still held at a different location',
-          action: 'Add a note for each of these cards to sell them from where they are held, or correct STORE_CODE to where the card actually is.',
+        { code: 'cardCheckpointMismatch', label: 'Kartu masih berada di lokasi yang berbeda',
+          action: 'Tambahkan catatan untuk setiap kartu ini agar dijual dari lokasi kartu berada, atau ubah STORE_CODE sesuai lokasi kartu sebenarnya.',
           items: cardCheckpointMismatch },
-        { code: 'duplicateMsisdn', label: 'The same MSISDN is used on more than one row',
-          action: 'Each MSISDN can be sold once — remove or correct the duplicate.',
+        { code: 'duplicateMsisdn', label: 'MSISDN yang sama dipakai di lebih dari satu baris',
+          action: 'Satu MSISDN hanya dapat dijual sekali — hapus atau perbaiki baris duplikatnya.',
           items: duplicateMsisdn },
-        { code: 'numberBoundToOtherCard', label: 'MSISDN is already merged with another ICCID',
-          action: 'Check which ICCID this MSISDN belongs to and correct the row.',
+        { code: 'numberBoundToOtherCard', label: 'MSISDN sudah dipasangkan dengan ICCID lain',
+          action: 'Periksa ICCID pemilik MSISDN ini, lalu perbaiki barisnya.',
           items: numberBoundToOtherCard },
-        { code: 'numberAlreadySold', label: 'MSISDN is already sold',
-          action: 'This number was sold previously — remove the row or correct the MSISDN.',
+        { code: 'numberAlreadySold', label: 'MSISDN sudah terjual',
+          action: 'Nomor ini sudah terjual sebelumnya — hapus barisnya atau perbaiki MSISDN.',
           items: numberAlreadySold },
-        { code: 'insufficientStock', label: 'Not enough stock at the store',
-          action: 'The store does not hold enough cards to cover these sales — check the stock figures.',
+        { code: 'insufficientStock', label: 'Stok di toko tidak mencukupi',
+          action: 'Toko tidak memiliki cukup kartu untuk penjualan ini — periksa jumlah stoknya.',
           items: insufficientStock },
-        { code: 'msisdnMismatch', label: 'MSISDN does not match the recorded sale',
-          action: 'Correct the MSISDN to the one recorded against this ICCID.',
+        { code: 'msisdnMismatch', label: 'MSISDN tidak sesuai dengan penjualan yang tercatat',
+          action: 'Ganti MSISDN sesuai yang tercatat untuk ICCID ini.',
           items: mismatched },
-        { code: 'storeMismatch', label: 'STORE_CODE does not match the recorded sale',
-          action: 'Correct STORE_CODE to the store where the sale was recorded.',
+        { code: 'storeMismatch', label: 'STORE_CODE tidak sesuai dengan penjualan yang tercatat',
+          action: 'Ganti STORE_CODE dengan toko tempat penjualan tercatat.',
           items: checkpointMismatch },
-        { code: 'soldAtMissing', label: 'The recorded sale has no date',
-          action: 'Contact support — this sale record is incomplete.',
+        { code: 'soldAtMissing', label: 'Penjualan yang tercatat tidak punya tanggal',
+          action: 'Hubungi tim support — data penjualan ini tidak lengkap.',
           items: noSoldAt },
-        { code: 'cardNotSold', label: 'Card status is not SOLD',
-          action: 'Contact support — the sale record and the card disagree.',
+        { code: 'cardNotSold', label: 'Status kartu bukan SOLD',
+          action: 'Hubungi tim support — data penjualan dan kartu tidak sama.',
           items: notSoldStatus },
-        { code: 'numberNotSold', label: 'Number status is not SOLD',
-          action: 'Contact support — the sale record and the number disagree.',
+        { code: 'numberNotSold', label: 'Status nomor bukan SOLD',
+          action: 'Hubungi tim support — data penjualan dan nomor tidak sama.',
           items: numberNotSold }
       ];
 
@@ -1580,30 +1583,30 @@ class StockController {
         // The message is written to stand on its own, so an existing client that only
         // renders `message` still shows the user what to fix and where.
         const EXAMPLES_PER_ISSUE = 3;
-        const n = (v: number) => v.toLocaleString('en-US');
+        const n = (v: number) => v.toLocaleString('id-ID');
 
         const sections = failed.map((b, i) => {
           const examples = b.items.slice(0, EXAMPLES_PER_ISSUE).map(it => {
-            const where = it.row > 0 ? `row ${it.row}` : 'file';
+            const where = it.row > 0 ? `baris ${it.row}` : 'file';
             const what  = it.iccid ? ` (ICCID ${it.iccid})` : '';
             return `     - ${where}${what}: ${it.detail ?? b.label}`;
           });
           const rest = b.items.length - examples.length;
-          if (rest > 0) examples.push(`     - ...and ${n(rest)} more row(s) with this problem`);
-          return `${i + 1}. ${b.label} - ${n(b.items.length)} row(s)\n` +
-                 `   How to fix: ${b.action}\n` +
-                 `   Examples:\n${examples.join('\n')}`;
+          if (rest > 0) examples.push(`     - ...dan ${n(rest)} baris lain dengan masalah ini`);
+          return `${i + 1}. ${b.label} - ${n(b.items.length)} baris\n` +
+                 `   Cara memperbaiki: ${b.action}\n` +
+                 `   Contoh:\n${examples.join('\n')}`;
         });
 
         const err = new Error(
-          `Upload rejected. ${n(failedRows)} of ${n(rows.length)} row(s) could not be processed, ` +
-          `so nothing was saved and no cards were changed.\n` +
+          `Upload ditolak. ${n(failedRows)} dari ${n(rows.length)} baris tidak dapat diproses, ` +
+          `jadi tidak ada data yang disimpan dan tidak ada kartu yang berubah.\n` +
           (readyRows > 0
-            ? `${n(readyRows)} row(s) are already correct and will go through once the problems below are fixed.\n`
+            ? `${n(readyRows)} baris sudah benar dan akan diproses setelah masalah di bawah ini diperbaiki.\n`
             : '') +
-          `\nProblems found:\n\n${sections.join('\n\n')}\n\n` +
-          `Fix these rows in the Excel file and upload it again. ` +
-          `The whole file is processed together, so every problem must be resolved before any sale is recorded.`
+          `\nMasalah yang ditemukan:\n\n${sections.join('\n\n')}\n\n` +
+          `Perbaiki baris-baris ini di file Excel, lalu unggah lagi. ` +
+          `Seluruh file diproses bersamaan, jadi semua masalah harus diperbaiki sebelum penjualan dicatat.`
         );
         (err as any).status = 422;
         (err as any).details = {
@@ -1739,12 +1742,12 @@ class StockController {
 
       const card = await prisma.$transaction(async (tx) => {
         if (!req.user) {
-          throw new Error('User not found');
+          throw new Error('User tidak ditemukan');
         }
 
         const validTargetStatuses = ['VERIFIED', 'BROKEN'];
         if (!rawStatus || !validTargetStatuses.includes(rawStatus)) {
-          const err = new Error("Status must be 'VERIFIED' or 'BROKEN'");
+          const err = new Error("Status harus 'VERIFIED' atau 'BROKEN'");
           (err as any).status = 400;
           throw err;
         }
@@ -1760,50 +1763,50 @@ class StockController {
         });
 
         if (!card) {
-          const err = new Error('Card not found');
+          const err = new Error('Kartu tidak ditemukan');
           (err as any).status = 404;
           throw err;
         }
 
         const allowed = req.checkpointCodes ?? [];
         if (!hasCheckpointAccess(card.checkpointCode, allowed)) {
-          const err = new Error('Card not found');
+          const err = new Error('Kartu tidak ditemukan');
           (err as any).status = 404;
           throw err;
         }
 
         if (!card.uploadBatch) {
-          const err = new Error('Card upload batch not found');
+          const err = new Error('Batch upload kartu tidak ditemukan');
           (err as any).status = 404;
           throw err;
         }
 
         if (card.uploadBatch.status === "COMPLETED") {
-          const err = new Error('Card upload batch is already completed');
+          const err = new Error('Batch upload kartu ini sudah selesai');
           (err as any).status = 409;
           throw err;
         }
 
         if (card.status === 'OPNAME') {
-          const err = new Error('Card is currently in an opname session and cannot be modified');
+          const err = new Error('Kartu sedang dalam sesi stok opname dan tidak dapat diubah');
           (err as any).status = 409;
           throw err;
         }
 
         if (card.status === 'DELIVERY') {
-          const err = new Error('Card is currently in delivery and cannot be modified');
+          const err = new Error('Kartu sedang dalam pengiriman dan tidak dapat diubah');
           (err as any).status = 409;
           throw err;
         }
 
         if (card.status === 'SOLD') {
-          const err = new Error('Card has already been sold');
+          const err = new Error('Kartu sudah terjual');
           (err as any).status = 409;
           throw err;
         }
 
         if (card.status !== 'UNVERIFIED') {
-          const err = new Error(`Card has already been validated`);
+          const err = new Error('Kartu sudah diverifikasi');
           (err as any).status = 409;
           throw err;
         }
