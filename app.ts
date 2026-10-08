@@ -39,7 +39,9 @@ app.use(cors({
     // which surfaces as an opaque preflight failure in the browser.
     return callback(null, false);
   },
-  credentials: true
+  credentials: true,
+  // Lets the browser read the file name of a download
+  exposedHeaders: ['Content-Disposition']
 }))
 app.use(cookieParser(process.env.COOKIE_SECRET || 'default-secret'));
 app.use("/api", router);

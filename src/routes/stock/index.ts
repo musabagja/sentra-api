@@ -1,6 +1,9 @@
 import express from 'express';
 import StockController from '../../controllers/stock.controller';
+import ExportController from '../../controllers/export.controller';
 import upload from '../../utils/multer.config';
+import Permissions from '../../middlewares/permission.handler';
+import { DOWNLOAD_ACCESS, PROCUREMENT_ACCESS } from '../../utils/access.util';
 
 const router = express.Router();
 
@@ -10,11 +13,21 @@ const router = express.Router();
 
 router.get('/batches', StockController.getBatches);
 
+// GET /api/stock/batches/export - Excel of the upload batches (must stay before /batches/:id)
+router.get('/batches/export', Permissions.require(DOWNLOAD_ACCESS.STOCK), ExportController.batches);
+
 router.get('/batches/:id', StockController.getBatch);
 
-router.put('/batches/close/:id', StockController.completeBatch);
+// GET /api/stock/batches/:id/items?type=cards|numbers - one page of a batch's cards or numbers
+router.get('/batches/:id/items', StockController.getBatchItems);
 
-router.delete('/batches/:id', StockController.deleteBatch);
+// Closing a verification is part of verifying
+router.put('/batches/close/:id', Permissions.require(PROCUREMENT_ACCESS.VERIFY), StockController.completeBatch);
+
+router.delete('/batches/:id', Permissions.require(PROCUREMENT_ACCESS.DELETE_BATCH), StockController.deleteBatch);
+
+// GET /api/stock/cards/export - Excel of the cards (must stay before /cards/:key)
+router.get('/cards/export', Permissions.require(DOWNLOAD_ACCESS.STOCK), ExportController.cards);
 
 // GET /api/stock/cards - Get all cards with pagination and filtering
 router.get('/cards', StockController.getCards);
@@ -26,7 +39,7 @@ router.get('/cards/:key', StockController.getCard);
 router.delete('/cards/:key', StockController.deleteCard);
 
 // POST /api/stock/cards/validate/:key - Validate a card
-router.post('/cards/validate/:key', StockController.validateCard);
+router.post('/cards/validate/:key', Permissions.require(PROCUREMENT_ACCESS.VERIFY), StockController.validateCard);
 
 // ============================================================================
 // NUMBER ROUTES
@@ -34,6 +47,9 @@ router.post('/cards/validate/:key', StockController.validateCard);
 
 // POST /api/stock/numbers - Create a new number
 router.post('/numbers', StockController.createNumber);
+
+// GET /api/stock/numbers/export - Excel of the numbers (must stay before /numbers/:key)
+router.get('/numbers/export', Permissions.require(DOWNLOAD_ACCESS.STOCK), ExportController.numbers);
 
 // GET /api/stock/numbers - Get all numbers with pagination and filtering
 router.get('/numbers', StockController.getNumbers);
@@ -48,7 +64,7 @@ router.put('/numbers/:key', StockController.updateNumber);
 router.delete('/numbers/:key', StockController.deleteNumber);
 
 // POST /api/upload/xlsx - Upload bunch of cards from Excel file
-router.post('/upload/xlsx', upload('xlsx').single('source'), StockController.uploadExcel);
+router.post('/upload/xlsx', Permissions.require(PROCUREMENT_ACCESS.ADD_STOCK), upload('xlsx').single('source'), StockController.uploadExcel);
 
 // POST /api/stock/upload/sold-xlsx - Mark sold cards as verified via Excel
 router.post('/upload/sold-xlsx', upload('xlsx').single('source'), StockController.uploadSoldExcel);
@@ -59,6 +75,10 @@ router.post('/merges', StockController.mergeSim);
 router.post('/merges/bulk', StockController.bulkMergeSim);
 
 router.get('/merges', StockController.getMerges);
+
+// GET /api/stock/sales-by-checkpoint - Sales per place, most sold first (Penjualan > Riwayat)
+router.get('/sales-by-checkpoint/export', Permissions.require(DOWNLOAD_ACCESS.SALES), ExportController.sales);
+router.get('/sales-by-checkpoint', StockController.getSalesByCheckpoint);
 
 // GET /api/stock/dashboard - Get dashboard data
 router.get('/dashboard', StockController.dashboardSync);

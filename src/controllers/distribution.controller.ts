@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { buildDistributionWhere } from '../utils/list-filters.util';
 import prisma from "../../lib/prisma";
 import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from "../utils/access.util";
 
@@ -144,33 +145,11 @@ class DistributionController {
 
   static async getDistributions(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, status, sourceCode, targetCode, startDueDate, endDueDate } = req.query;
+      const { page = 1, limit = 10 } = req.query;
       const circleCode = req.user!.circleCode;
 
-      // Base access scope: user sees distributions where they own either end (source or target).
-      // Specific filters are AND-appended on top — kept separate so they don't collapse into
-      // an OR that returns results matching only one side when both filters are provided.
-      const where: any = {
-        AND: [
-          {
-            OR: [
-              { source: checkpointInCircle(circleCode) },
-              { target: checkpointInCircle(circleCode) }
-            ]
-          }
-        ]
-      };
-      if (status) where.AND.push({ status });
-      if (sourceCode) where.AND.push({ sourceCode: sourceCode as string });
-      if (targetCode) where.AND.push({ targetCode: targetCode as string });
-      if (startDueDate || endDueDate) {
-        where.AND.push({
-          scheduledAt: {
-            ...(startDueDate && { gte: new Date(startDueDate as string) }),
-            ...(endDueDate && { lte: new Date(endDueDate as string) })
-          }
-        });
-      }
+      // Shared with the Excel export so the file always matches the list
+      const where: any = buildDistributionWhere(req.query, circleCode);
 
       const [distributions, total] = await Promise.all([
         prisma.distribution.findMany({

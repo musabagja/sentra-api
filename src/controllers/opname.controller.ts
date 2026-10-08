@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { wibEndOfDay, wibStartOfDay } from '../utils/wib.util';
 import prisma from "../../lib/prisma";
 
 import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from "../utils/access.util";
@@ -383,8 +384,8 @@ class OpnameController {
       if (type) where.type = type;
       if (startDate || endDate) {
         where.createdAt = {
-          ...(startDate && { gte: new Date(startDate as string) }),
-          ...(endDate   && { lte: new Date(endDate as string) })
+          ...(startDate && { gte: wibStartOfDay(String(startDate)) }),
+          ...(endDate   && { lte: wibEndOfDay(String(endDate)) })
         };
       }
 

@@ -2,8 +2,20 @@ import type { Request, Response, NextFunction } from 'express';
 import prisma from '../../lib/prisma';
 import Bcrypt from '../utils/bcrypt.util';
 import JWT from '../utils/jwt.util';
+import { USER_STATUS } from '../utils/access.util';
 
 const isProduction = process.env.NODE_ENV === "production";
+
+const MIN_PASSWORD_LENGTH = 8;
+// bcrypt only reads the first 72 bytes, so a longer password would silently be cut
+const MAX_PASSWORD_BYTES = 72;
+
+const badRequest = (message: string, code: string) => {
+  const err = new Error(message);
+  (err as any).status = 400;
+  (err as any).code = code;
+  return err;
+};
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -46,18 +58,30 @@ class UserController {
       if (!user) {
         const err = new Error('This code is not registered to any user.');
         (err as any).status = 401;
+        (err as any).code = 'USER_NOT_FOUND';
         throw err;
       }
 
-      if (user.status !== 'ACTIVE') {
-        const err = new Error('This account is inactive.');
-        (err as any).status = 401;
-        throw err;
-      }
-
+      // Check the password first: whether an account is frozen is only revealed to
+      // someone who knows its password
       if (!user.password || !Bcrypt.compare(password, user.password)) {
         const err = new Error('Invalid password.');
         (err as any).status = 401;
+        (err as any).code = 'INVALID_PASSWORD';
+        throw err;
+      }
+
+      if (user.status === USER_STATUS.FROZEN) {
+        const err = new Error('This account is frozen.');
+        (err as any).status = 401;
+        (err as any).code = 'ACCOUNT_FROZEN';
+        throw err;
+      }
+
+      if (user.status !== USER_STATUS.ACTIVE) {
+        const err = new Error('This account is inactive.');
+        (err as any).status = 401;
+        (err as any).code = 'ACCOUNT_INACTIVE';
         throw err;
       }
 
@@ -143,11 +167,15 @@ class UserController {
         where: { code: session.userCode }
       });
 
-      if (!user || user.status !== 'ACTIVE') {
+      if (!user || user.status !== USER_STATUS.ACTIVE) {
         res.clearCookie('refresh_token', clearOptions);
         res.clearCookie('access_token', clearOptions);
-        const err = new Error('Session expired, please sign in again.');
+        const frozen = user?.status === USER_STATUS.FROZEN;
+        const err = new Error(
+          frozen ? 'This account is frozen.' : 'Session expired, please sign in again.'
+        );
         (err as any).status = 401;
+        if (frozen) (err as any).code = 'ACCOUNT_FROZEN';
         throw err;
       }
 
@@ -203,6 +231,55 @@ class UserController {
       res.clearCookie('access_token', clearOptions);
 
       res.status(200).json({ message: 'Sign-out successful' });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * PUT /api/users/me/password: the signed-in user changes their own password.
+   * Needs the current password. Every other session of the user is signed out; this one stays.
+   * Wrong current password answers 400, not 401: the client treats 401 as an expired session.
+   */
+  static async changeOwnPassword(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { currentPassword, newPassword } = req.body ?? {};
+
+      if (typeof currentPassword !== 'string' || !currentPassword) {
+        throw badRequest('Current password is required.', 'CURRENT_PASSWORD_REQUIRED');
+      }
+      if (typeof newPassword !== 'string' || newPassword.length < MIN_PASSWORD_LENGTH) {
+        throw badRequest(`New password must be at least ${MIN_PASSWORD_LENGTH} characters.`, 'PASSWORD_TOO_SHORT');
+      }
+      if (Buffer.byteLength(newPassword) > MAX_PASSWORD_BYTES) {
+        throw badRequest(`New password must be at most ${MAX_PASSWORD_BYTES} bytes.`, 'PASSWORD_TOO_LONG');
+      }
+      if (newPassword === currentPassword) {
+        throw badRequest('New password must be different from the current one.', 'PASSWORD_UNCHANGED');
+      }
+
+      const user = await prisma.user.findUnique({ where: { code: req.user!.code } });
+      if (!user?.password || !Bcrypt.compare(currentPassword, user.password)) {
+        throw badRequest('Current password is incorrect.', 'WRONG_CURRENT_PASSWORD');
+      }
+
+      // The session of this request stays signed in; all the others end
+      let currentSession: string | undefined;
+      try {
+        const refreshToken = isProduction ? req.signedCookies['refresh_token'] : req.cookies['refresh_token'];
+        currentSession = (JWT.verify(refreshToken) as { session: string }).session;
+      } catch {
+        currentSession = undefined;
+      }
+
+      await prisma.$transaction([
+        prisma.user.update({ where: { code: user.code }, data: { password: Bcrypt.hash(newPassword) } }),
+        prisma.session.deleteMany({
+          where: { userCode: user.code, ...(currentSession ? { id: { not: currentSession } } : {}) }
+        })
+      ]);
+
+      res.status(200).json({ message: 'Password changed successfully' });
     } catch (error) {
       next(error);
     }

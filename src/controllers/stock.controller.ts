@@ -1,8 +1,13 @@
 import type { Request, Response, NextFunction } from 'express';
+import {
+  wibEndOfDay, wibMonthEnd, wibMonthIndex, wibMonthStart, wibStartOfDay, wibToday, wibYearEnd, wibYearStart, wibYmd
+} from '../utils/wib.util';
 import prisma from '../../lib/prisma';
 import * as xlsx from 'xlsx';
 
 import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from '../utils/access.util';
+import { batchInScope, buildBatchWhere, buildCardWhere, buildNumberWhere, csvParam } from '../utils/list-filters.util';
+import { rankSalesByPlace } from '../utils/sales-ranking.util';
 
 // Excel hands back numeric cells as JS doubles. An ICCID is 19-20 digits, well past
 // Number.MAX_SAFE_INTEGER (~9.0e15), so an ICCID column that was not formatted as Text
@@ -44,6 +49,9 @@ const fetchChunked = async <T,>(keys: string[], fn: (batch: string[]) => Promise
 // Error lists are capped so a bad 5,000-row upload does not return a 5,000-item payload.
 const MAX_LISTED_ERRORS = 50;
 
+// A cross-location sale note is stored in Merge.remark
+const MAX_NOTE_LENGTH = 255;
+
 // One rejected row, addressed by its position in the uploaded sheet so the person
 // fixing the file can find it without counting.
 export type RowIssue = {
@@ -51,7 +59,23 @@ export type RowIssue = {
   iccid: string;
   msisdn?: string;
   storeCode?: string;
+  fromCode?: string; // where the card is actually held (cross-location sales)
   detail?: string;
+};
+
+// Cards held at one location but reported sold at another, grouped per route.
+const groupByRoute = (items: RowIssue[]) => {
+  const groups = new Map<string, { from: string; to: string; count: number; items: { row: number; iccid: string; msisdn: string | undefined }[] }>();
+  for (const it of items) {
+    const from = it.fromCode ?? '';
+    const to = it.storeCode ?? '';
+    const key = `${from}>${to}`;
+    const group = groups.get(key) ?? { from, to, count: 0, items: [] };
+    group.items.push({ row: it.row, iccid: it.iccid, msisdn: it.msisdn });
+    group.count = group.items.length;
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count);
 };
 
 const errorBucket = (items: RowIssue[]) => ({
@@ -69,20 +93,18 @@ class StockController {
       const dcCode    = req.query.dcCode    as string | undefined;
       const storeCode = req.query.storeCode as string | undefined;
 
+      // The calendar is Jakarta's, whatever time zone the server runs in
       const now          = new Date();
-      const currentYear  = now.getFullYear();
-      const currentMonth = now.getMonth() + 1; // 1-indexed
+      const { year: currentYear, month: currentMonth } = wibYmd(now); // month is 1-indexed
 
       const year  = Number(req.query.year)  || currentYear;
       const month = Number(req.query.month) || currentMonth;
 
       // Cutoff: end of today when viewing the current month, otherwise last day of the requested month
       const isCurrentPeriod = year === currentYear && month === currentMonth;
-      const cutoff = isCurrentPeriod
-        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-        : new Date(year, month, 0, 23, 59, 59, 999); // day 0 of next month = last day of this month
+      const cutoff = isCurrentPeriod ? wibEndOfDay(now) : wibMonthEnd(year, month);
 
-      const yearStart = new Date(year, 0, 1);
+      const yearStart = wibYearStart(year);
 
       const scopeFilter = {
         status: 'DELIVERED' as const,
@@ -263,6 +285,16 @@ class StockController {
       const topLeastStoreStock = [...storeStocks].sort(byStockThenPending).slice(0, 10);
       const topMostDCStock     = [...dcStocks].sort(byStockThenPending).slice(0, 10);
 
+      // Every store / DC with its stock, lowest first, for the dashboard's "Lihat semua" modal
+      const byLowestStock = (a: { currentStock: number; name: string }, b: typeof a) =>
+        a.currentStock - b.currentStock || a.name.localeCompare(b.name);
+      const stockList = (rows: typeof storeStocks) =>
+        rows
+          .map(({ name, code, currentStock, pendingStock }) => ({ name, code, currentStock, pendingStock }))
+          .sort(byLowestStock);
+      const allStoreStock = stockList(storeStocks);
+      const allDCStock    = stockList(dcStocks);
+
       // Circle-wide totals across every checkpoint of the type, not just the top 10
       const totalStoreStock   = storeStocks.reduce((sum, c) => sum + c.currentStock, 0);
       const totalDCStock      = dcStocks.reduce((sum, c) => sum + c.currentStock, 0);
@@ -290,7 +322,7 @@ class StockController {
       const buildMonthlyTotals = (rows: { amount: number; createdAt: Date }[]) => {
         const months = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
         for (const row of rows) {
-          months[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
+          months[wibMonthIndex(row.createdAt)]!.amount += row.amount ?? 0;
         }
         return months;
       };
@@ -312,6 +344,8 @@ class StockController {
           distributedToStoreByMonth,
           topLeastStoreStock,
           topMostDCStock,
+          allStoreStock,
+          allDCStock,
           totalStoreStock,
           totalDCStock,
           totalStorePending,
@@ -337,14 +371,12 @@ class StockController {
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
       const now         = new Date();
-      const currentYear = now.getFullYear();
+      const currentYear = wibYmd(now).year;
       const year        = Number(req.query.year) || currentYear;
 
-      const cutoff = year === currentYear
-        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-        : new Date(year, 11, 31, 23, 59, 59, 999);
+      const cutoff = year === currentYear ? wibEndOfDay(now) : wibYearEnd(year);
 
-      const yearStart = new Date(year, 0, 1);
+      const yearStart = wibYearStart(year);
 
       if (checkpointCode && !allowed.includes(checkpointCode)) {
         const err = new Error('Checkpoint not found');
@@ -371,7 +403,7 @@ class StockController {
 
       const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
       for (const row of rows) {
-        chart[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
+        chart[wibMonthIndex(row.createdAt)]!.amount += row.amount ?? 0;
       }
 
       res.status(200).json({
@@ -390,14 +422,12 @@ class StockController {
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
       const now         = new Date();
-      const currentYear = now.getFullYear();
+      const currentYear = wibYmd(now).year;
       const year        = Number(req.query.year) || currentYear;
 
-      const cutoff = year === currentYear
-        ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
-        : new Date(year, 11, 31, 23, 59, 59, 999);
+      const cutoff = year === currentYear ? wibEndOfDay(now) : wibYearEnd(year);
 
-      const yearStart = new Date(year, 0, 1);
+      const yearStart = wibYearStart(year);
 
       if (checkpointCode && !allowed.includes(checkpointCode)) {
         const err = new Error('Checkpoint not found');
@@ -424,7 +454,7 @@ class StockController {
 
       const chart = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 }));
       for (const row of rows) {
-        chart[new Date(row.createdAt).getMonth()]!.amount += row.amount ?? 0;
+        chart[wibMonthIndex(row.createdAt)]!.amount += row.amount ?? 0;
       }
 
       res.status(200).json({
@@ -439,26 +469,104 @@ class StockController {
   static async getBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
-      const allowed = req.checkpointCodes ?? [];
+      const circleCode = req.user!.circleCode;
 
-      const batch = await prisma.uploadBatch.findUnique({
-        where: { id: Number(id) },
-        include: {
-          cards: { take: 50, orderBy: { createdAt: 'desc' } },
-          numbers: { take: 50, orderBy: { createdAt: 'desc' } },
-          progress: { take: 1, orderBy: { createdAt: 'desc' } }
-        }
+      const batch = await prisma.uploadBatch.findFirst({
+        where: { id: Number(id), AND: [batchInScope(circleCode)] },
+        include: { progress: { take: 1, orderBy: { createdAt: 'desc' } } }
       });
 
-      if (!batch || (batch.cards.length > 0 && !batch.cards.some(c => allowed.includes(c.checkpointCode)))) {
+      if (!batch) {
         const err = new Error('Batch not found');
         (err as any).status = 404;
         throw err;
       }
 
+      // Exact counts for the whole batch. The cards and numbers themselves are paged
+      // through GET /batches/:id/items, so the page never works from a partial list.
+      const [cards, unverified, numbers] = await Promise.all([
+        prisma.card.count({ where: { batchCode: batch.code, checkpoint: checkpointInCircle(circleCode) } }),
+        prisma.card.count({ where: { batchCode: batch.code, checkpoint: checkpointInCircle(circleCode), status: 'UNVERIFIED' } }),
+        prisma.number.count({
+          where: { batchCode: batch.code, OR: [{ checkpoint: checkpointInCircle(circleCode) }, { checkpointCode: null }] }
+        })
+      ]);
+
       res.status(200).json({
         message: 'Batch retrieved successfully',
-        data: { batch }
+        data: { batch, counts: { cards, unverified, verified: cards - unverified, numbers } }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // GET /api/stock/batches/:id/items?type=cards|numbers&page&limit&search
+  static async getBatchItems(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      const { type = 'cards', page = 1, limit = 10, search } = req.query;
+      const circleCode = req.user!.circleCode;
+
+      if (type !== 'cards' && type !== 'numbers') {
+        const err = new Error("type must be 'cards' or 'numbers'");
+        (err as any).status = 422;
+        throw err;
+      }
+      const take = Math.min(100, Math.max(1, Number(limit) || 10));
+      const pageNumber = Math.max(1, Number(page) || 1);
+
+      const batch = await prisma.uploadBatch.findFirst({
+        where: { id: Number(id), AND: [batchInScope(circleCode)] },
+        select: { code: true }
+      });
+      if (!batch) {
+        const err = new Error('Batch not found');
+        (err as any).status = 404;
+        throw err;
+      }
+
+      const keyFilter = search ? { key: { contains: String(search) } } : {};
+
+      if (type === 'cards') {
+        const where = { batchCode: batch.code, checkpoint: checkpointInCircle(circleCode), ...keyFilter };
+        const [items, total] = await Promise.all([
+          prisma.card.findMany({
+            where,
+            skip: (pageNumber - 1) * take,
+            take,
+            orderBy: { id: 'desc' },
+            select: { id: true, key: true, status: true, createdAt: true, validatedAt: true }
+          }),
+          prisma.card.count({ where })
+        ]);
+        res.status(200).json({
+          message: 'Batch cards retrieved successfully',
+          data: { items },
+          pagination: { page: pageNumber, limit: take, total, pages: Math.ceil(total / take) }
+        });
+        return;
+      }
+
+      const where = {
+        batchCode: batch.code,
+        OR: [{ checkpoint: checkpointInCircle(circleCode) }, { checkpointCode: null }],
+        ...keyFilter
+      };
+      const [items, total] = await Promise.all([
+        prisma.number.findMany({
+          where,
+          skip: (pageNumber - 1) * take,
+          take,
+          orderBy: { id: 'desc' },
+          select: { id: true, key: true, remark: true, batchCode: true, createdAt: true }
+        }),
+        prisma.number.count({ where })
+      ]);
+      res.status(200).json({
+        message: 'Batch numbers retrieved successfully',
+        data: { items },
+        pagination: { page: pageNumber, limit: take, total, pages: Math.ceil(total / take) }
       });
     } catch (error) {
       next(error);
@@ -478,18 +586,8 @@ class StockController {
         throw err;
       }
 
-      const where: any = {
-        cards: { some: { checkpoint: checkpointInCircle(circleCode) } }
-      };
-      if (status) {
-        where.status = status;
-      }
-      if (search) {
-        where.OR = [
-          { code: { contains: search as string } },
-          { name: { contains: search as string } }
-        ];
-      }
+      // Shared with the Excel export so the file always matches the list
+      const where: any = buildBatchWhere(req.query, circleCode);
 
       const batches = await prisma.uploadBatch.findMany({
         take: Number(limit),
@@ -504,11 +602,13 @@ class StockController {
         }
       });
 
+      // The tiles describe the batches the list is showing (same search and status filter)
+      const cardsInView = { checkpoint: checkpointInCircle(circleCode), uploadBatch: where };
       const [totalBatch, totalCards, totalVerified, totalUnverified] = await Promise.all([
         prisma.uploadBatch.count({ where }),
-        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode) } }),
-        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode), status: 'VERIFIED' } }),
-        prisma.card.count({ where: { checkpoint: checkpointInCircle(circleCode), status: 'UNVERIFIED' } })
+        prisma.card.count({ where: cardsInView }),
+        prisma.card.count({ where: { ...cardsInView, status: 'VERIFIED' } }),
+        prisma.card.count({ where: { ...cardsInView, status: 'UNVERIFIED' } })
       ]);
 
       res.status(200).json({
@@ -538,15 +638,13 @@ class StockController {
     try {
       const { id } = req.params;
       const { note } = req.body ?? {};
-      const allowed = req.checkpointCodes ?? [];
 
       const batch = await prisma.$transaction(async (tx) => {
-        const currentBatch = await tx.uploadBatch.findUnique({
-          where: { id: Number(id) },
-          include: { cards: { select: { checkpointCode: true } } }
+        const currentBatch = await tx.uploadBatch.findFirst({
+          where: { id: Number(id), AND: [batchInScope(req.user!.circleCode)] }
         });
 
-        if (!currentBatch || (currentBatch.cards.length > 0 && !currentBatch.cards.some(c => allowed.includes(c.checkpointCode)))) {
+        if (!currentBatch) {
           const err = new Error('Batch not found');
           (err as any).status = 404;
           throw err;
@@ -591,20 +689,40 @@ class StockController {
   static async deleteBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
-      const allowed = req.checkpointCodes ?? [];
 
-      const batch = await prisma.uploadBatch.findUnique({
-        where: { id: Number(id) },
+      const batch = await prisma.uploadBatch.findFirst({
+        where: { id: Number(id), AND: [batchInScope(req.user!.circleCode)] },
         include: {
           cards: {
             select: { key: true, id: true, status: true, checkpointCode: true }
-          }
+          },
+          numbers: { select: { key: true, id: true, status: true, checkpointCode: true } }
         }
       });
 
-      if (!batch || !batch.cards.some(c => allowed.includes(c.checkpointCode))) {
+      if (!batch) {
         const err = new Error('Batch not found');
         (err as any).status = 404;
+        throw err;
+      }
+
+      // Deleting removes everything in the batch, so all of it must belong to the caller's circle.
+      // A batch that only carries MSISDNs is visible to everyone (numbers without a checkpoint are
+      // shared stock) and is therefore not the caller's to delete; neither is one that holds cards
+      // or numbers of another circle.
+      const mine = new Set(req.checkpointCodes ?? []);
+      if (batch.cards.length === 0) {
+        const err = new Error('Cannot delete a batch that has no ICCID: it is not tied to your circle');
+        (err as any).status = 403;
+        throw err;
+      }
+      const foreignCards = batch.cards.filter(c => !mine.has(c.checkpointCode)).length;
+      const foreignNumbers = batch.numbers.filter(n => n.checkpointCode && !mine.has(n.checkpointCode)).length;
+      if (foreignCards > 0 || foreignNumbers > 0) {
+        const err = new Error(
+          `Cannot delete batch: ${foreignCards + foreignNumbers} item(s) belong to another circle`
+        );
+        (err as any).status = 403;
         throw err;
       }
 
@@ -624,7 +742,16 @@ class StockController {
         throw err;
       }
 
+      // A number that has already been sold is tied to a sale record and must not vanish with its batch
+      const invalidNumbers = batch.numbers.filter(n => n.status === 'SOLD');
+      if (invalidNumbers.length > 0) {
+        const err = new Error(`Cannot delete batch: ${invalidNumbers.length} number(s) have already been sold`);
+        (err as any).status = 400;
+        throw err;
+      }
+
       const cardIds = batch.cards.map(c => c.id);
+      const numberIds = batch.numbers.map(n => n.id);
       const cardKeys = batch.cards.map(c => c.key);
 
       // Group VERIFIED cards by checkpoint — only VERIFIED cards contributed to CardStock.
@@ -646,6 +773,11 @@ class StockController {
         }
 
         await tx.card.deleteMany({ where: { batchCode: batch.code } });
+
+        // A number's own movements go with it (they point at the number and would block the delete)
+        for (const ids of chunkArray(numberIds)) {
+          await tx.numberMovement.deleteMany({ where: { numberID: { in: ids } } });
+        }
         await tx.number.deleteMany({ where: { batchCode: batch.code } });
 
         // Decrement CardStock only by the VERIFIED cards removed per checkpoint,
@@ -674,40 +806,11 @@ class StockController {
 
   static async getCards(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, checkpointCode, status, search, uploadAt, batch, validatedAt } = req.query;
+      const { page = 1, limit = 10 } = req.query;
       const circleCode = req.user!.circleCode;
 
-      const where: any = {
-        // Scope to checkpoints in the user's circle; intersect with any requested checkpointCode
-        checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined)
-      };
-      if (status) where.status = status;
-      if (search) {
-        where.OR = [
-          { key: { contains: search as string } },
-          { name: { contains: search as string } }
-        ];
-      }
-      // validatedAt filter (related via Card -> Merge)
-      if (validatedAt) {
-        where.validatedAt = {
-          gte: new Date(`${validatedAt}T00:00:00.000Z`),
-          lt: new Date(`${validatedAt}T23:59:59.999Z`)
-        }
-      }
-      if (uploadAt || batch) {
-        where.uploadBatch = {
-          ...(uploadAt && {
-            createdAt: {
-              gte: new Date(`${uploadAt}T00:00:00.000Z`),
-              lt: new Date(`${uploadAt}T23:59:59.999Z`)
-            }
-          }),     
-          ...(batch && {
-            code: { contains: batch as string }
-          })
-        };
-      }
+      // Shared with the Excel export so the file always matches the list
+      const where: any = buildCardWhere(req.query, circleCode);
 
       const [cards, total] = await Promise.all([
         prisma.card.findMany({
@@ -851,39 +954,66 @@ class StockController {
         parsedSheets.push({ sheet, rows: sheetRows(sheetData) });
       }
 
+      if (parsedSheets.length === 0) {
+        const err = new Error(
+          `The file has no sheet named ICCID or MSISDN (found: ${workbook.SheetNames.join(', ')}). Download the template and keep its sheet names.`
+        );
+        (err as any).status = 422;
+        throw err;
+      }
+
       const { batchID } = req.body;
       const userCode = req.user.code;
       const allowed = req.checkpointCodes ?? [];
 
       // Prepare rows without batchCode; batchCode is injected inside the transaction.
-      // ICCID rows without a CHECKPOINT column are skipped — cards require a checkpoint.
-      // ICCID rows whose checkpoint is outside the user's circle are also rejected.
-      // MSISDN rows may omit CHECKPOINT (numbers are globally accessible).
-      let skippedCardRows = 0;
+      // Every row that is not imported is counted under a reason, so the person who uploaded
+      // the file is told what happened to it instead of seeing a silent "success".
+      //  - ICCID rows need a CHECKPOINT inside the user's circle (cards cannot exist without one).
+      //  - MSISDN rows may omit CHECKPOINT (numbers are globally accessible), but a CHECKPOINT
+      //    that is given must be one the user can use.
+      // Checkpoint codes are matched ignoring letter case and stored exactly as the checkpoint
+      // spells them, so "dc02" and "DC02" can never end up as two different codes.
+      const canonicalCheckpoint = new Map(allowed.map(code => [code.toLowerCase(), code]));
+      const skipReasons: Record<string, number> = {};
+      const skipSamples: { sheet: string; row: number; key: string; reason: string }[] = [];
+      const noteSkip = (sheet: string, row: number, key: string, reason: string) => {
+        skipReasons[reason] = (skipReasons[reason] ?? 0) + 1;
+        if (skipSamples.length < MAX_LISTED_ERRORS) skipSamples.push({ sheet, row, key, reason });
+      };
+
       const preparedSheets = parsedSheets.map(({ sheet, rows }) => {
         const seen = new Set<string>();
-        const data = rows
-          .flatMap((row: any) => {
-            const key = normalizeKeyCell(row.KEY || row.key).key;
-            const rawCheckpoint = row.CHECKPOINT || row.checkpoint;
-            if (sheet === 'ICCID') {
-              if (!rawCheckpoint || !allowed.includes(String(rawCheckpoint))) {
-                skippedCardRows++;
-                return [];
-              }
-            }
-            return [{
-              key,
-              checkpointCode: rawCheckpoint ? String(rawCheckpoint) : null,
-              remark: row.REMARK || row.remark || ''
-            }];
-          })
-          .filter((item: any) => {
-            if (!item.key || item.key === 'undefined' || seen.has(item.key)) return false;
-            seen.add(item.key);
-            return true;
+        const data: { key: string; checkpointCode: string | null; remark: string; row: number }[] = [];
+
+        rows.forEach((row: any, index: number) => {
+          const rowNumber = index + 2; // the sheet's own row number (row 1 is the header)
+          const cell = normalizeKeyCell(row.KEY ?? row.key);
+          const shownKey = String(row.KEY ?? row.key ?? '').trim();
+
+          if (cell.unreadable) return noteSkip(sheet, rowNumber, shownKey, 'unreadableKey');
+          if (!cell.key || cell.key === 'undefined') return noteSkip(sheet, rowNumber, shownKey, 'emptyKey');
+
+          const rawCheckpoint = String(row.CHECKPOINT ?? row.checkpoint ?? '').trim();
+          const checkpointCode = rawCheckpoint ? canonicalCheckpoint.get(rawCheckpoint.toLowerCase()) : undefined;
+          if (sheet === 'ICCID') {
+            if (!rawCheckpoint) return noteSkip(sheet, rowNumber, cell.key, 'missingCheckpoint');
+            if (!checkpointCode) return noteSkip(sheet, rowNumber, cell.key, 'checkpointNotAllowed');
+          } else if (rawCheckpoint && !checkpointCode) {
+            return noteSkip(sheet, rowNumber, cell.key, 'checkpointNotAllowed');
+          }
+
+          if (seen.has(cell.key)) return noteSkip(sheet, rowNumber, cell.key, 'duplicateInFile');
+          seen.add(cell.key);
+
+          data.push({
+            key: cell.key,
+            checkpointCode: checkpointCode ?? null,
+            remark: String(row.REMARK ?? row.remark ?? '').trim(),
+            row: rowNumber
           });
-        return { sheet, data };
+        });
+        return { sheet, data, received: rows.length };
       });
 
       const CHUNK_SIZE = 500;
@@ -897,7 +1027,7 @@ class StockController {
       // movement and the stock snapshot all agree.
       const validatedAt = new Date();
 
-      const { totalCreated, parsedTotal } = await prisma.$transaction(async (tx) => {
+      const { totalCreated, perSheet } = await prisma.$transaction(async (tx) => {
         let batch: { id: number; code: string };
         // Stock is written once per checkpoint, never once per card: CardStock is a
         // latest-row-wins snapshot, so N rows per checkpoint would leave the
@@ -929,7 +1059,7 @@ class StockController {
         // Inject batchCode now that we have it
         const jsonData = preparedSheets.map(({ sheet, data }) => ({
           sheet,
-          data: data.map(row => ({ ...row, batchCode: batch.code }))
+          data: data.map(({ row: _row, ...rest }) => ({ ...rest, batchCode: batch.code }))
         }));
 
         const parsedTotal = jsonData.reduce((sum, s) => sum + s.data.length, 0);
@@ -951,6 +1081,7 @@ class StockController {
                 existing.forEach(c => existingSet.add(c.key));
               }
               const newRows = (data as any[]).filter((r: any) => !existingSet.has(r.key));
+              const existingKeys = (data as any[]).filter((r: any) => existingSet.has(r.key)).map((r: any) => r.key);
               let count = 0;
               // Uploaded cards enter stock immediately — no separate validation step.
               // That means reproducing every side effect validateCard would have
@@ -980,7 +1111,7 @@ class StockController {
                   perCheckpoint.set(c.checkpointCode, (perCheckpoint.get(c.checkpointCode) ?? 0) + 1);
                 }
               }
-              return { count };
+              return { sheet, count, existingKeys };
             } else {
               const existingSet = new Set<string>();
               for (const keyChunk of chunk(keys, CHUNK_SIZE)) {
@@ -988,12 +1119,13 @@ class StockController {
                 existing.forEach(n => existingSet.add(n.key));
               }
               const newRows = data.filter((r: any) => !existingSet.has(r.key));
+              const existingKeys = data.filter((r: any) => existingSet.has(r.key)).map((r: any) => r.key);
               let count = 0;
               for (const rowChunk of chunk(newRows, CHUNK_SIZE)) {
                 const created = await tx.number.createMany({ data: rowChunk });
                 count += created.count;
               }
-              return { count };
+              return { sheet, count, existingKeys };
             }
           })
         );
@@ -1042,15 +1174,45 @@ class StockController {
           await tx.uploadBatch.update({ where: { id: batch.id }, data: { status: 'COMPLETED' } });
         }
 
-        return { totalCreated, parsedTotal };
+        return { totalCreated, perSheet: result };
       }, {
         timeout: Number(process.env.UPLOAD_TX_TIMEOUT_MS) || 120000,
         maxWait: Number(process.env.UPLOAD_TX_MAXWAIT_MS) || 10000
       });
 
+      // Rows that were fine but already exist in the system are skipped too: tell the person
+      const reasons: Record<string, number> = { ...skipReasons };
+      const samples = [...skipSamples];
+      let alreadyExists = 0;
+      for (const { sheet, existingKeys } of perSheet) {
+        alreadyExists += existingKeys.length;
+        for (const key of existingKeys.slice(0, Math.max(0, MAX_LISTED_ERRORS - samples.length))) {
+          const row = preparedSheets.find(p => p.sheet === sheet)?.data.find(d => d.key === key)?.row ?? 0;
+          samples.push({ sheet, row, key, reason: 'alreadyExists' });
+        }
+      }
+      if (alreadyExists > 0) reasons.alreadyExists = alreadyExists;
+
+      const sheetSummary = (name: string) => {
+        const prepared = preparedSheets.find(p => p.sheet === name);
+        if (!prepared) return null;
+        const created = perSheet.find(r => r.sheet === name)?.count ?? 0;
+        return { received: prepared.received, created, skipped: prepared.received - created };
+      };
+      const received = preparedSheets.reduce((sum, p) => sum + p.received, 0);
+
       res.status(200).json({
         message: 'Upload completed successfully',
-        data: { total: parsedTotal, created: totalCreated, skipped: skippedCardRows }
+        data: {
+          total: received,
+          created: totalCreated,
+          skipped: received - totalCreated,
+          iccid: sheetSummary('ICCID'),
+          msisdn: sheetSummary('MSISDN'),
+          reasons,
+          samples,
+          ignoredSheets: workbook.SheetNames.filter(name => !allowedSheets.includes(name))
+        }
       });
     } catch (error) {
       next(error);
@@ -1076,6 +1238,35 @@ class StockController {
       }
 
       const rows: any[] = sheetRows(sheet);
+
+      // Notes for cards sold from a different location than they are held at: { [iccid]: text }.
+      // Sent as a multipart text field by the "Perlu catatan" step; only rows that need one use it.
+      const notes = new Map<string, string>();
+      const rawNotes = (req as any).body?.notes;
+      if (rawNotes !== undefined && rawNotes !== '') {
+        let parsedNotes: unknown;
+        try {
+          parsedNotes = JSON.parse(String(rawNotes));
+        } catch {
+          const err = new Error('notes must be a JSON object of { ICCID: note }');
+          (err as any).status = 422;
+          throw err;
+        }
+        if (!parsedNotes || typeof parsedNotes !== 'object' || Array.isArray(parsedNotes)) {
+          const err = new Error('notes must be a JSON object of { ICCID: note }');
+          (err as any).status = 422;
+          throw err;
+        }
+        for (const [iccid, value] of Object.entries(parsedNotes as Record<string, unknown>)) {
+          const text = typeof value === 'string' ? value.trim() : '';
+          if (text.length > MAX_NOTE_LENGTH) {
+            const err = new Error(`The note for ICCID ${iccid} is longer than ${MAX_NOTE_LENGTH} characters`);
+            (err as any).status = 422;
+            throw err;
+          }
+          if (text) notes.set(iccid, text);
+        }
+      }
 
       type SoldRow = { row: number; iccid: string; msisdn: string; storeCode: string; trn: string | null };
       const parsed: SoldRow[] = [];
@@ -1180,7 +1371,8 @@ class StockController {
       const numberBoundToOtherCard: RowIssue[] = [];
       const duplicateMsisdn: RowIssue[]       = [];
 
-      type CreateRow = SoldRow & { cardID: number };
+      // holderCode: where the card physically is (stock leaves from here); storeCode: where it was sold.
+      type CreateRow = SoldRow & { cardID: number; holderCode: string; remark: string | null };
       const toCreate: CreateRow[] = [];
       const toVerify: string[] = [];
       const msisdnSeen = new Map<string, string>();
@@ -1243,9 +1435,17 @@ class StockController {
         if (!row.storeCode) {
           storeCodeMissing.push({ ...issue, detail: 'STORE_CODE is empty' }); continue;
         }
-        if (card.checkpointCode !== row.storeCode) {
-          cardCheckpointMismatch.push({ ...issue, detail: `card is currently held at ${card.checkpointCode}, not ${row.storeCode}` });
-          continue;
+        // Sold somewhere other than where the card is held: allowed only with a note for that card.
+        const crossLocation = card.checkpointCode !== row.storeCode;
+        if (crossLocation) {
+          if (!hasCheckpointAccess(card.checkpointCode, allowed)) {
+            storeNotAccessible.push({ ...issue, detail: `the card is held at ${card.checkpointCode}, which is not a checkpoint you can access` });
+            continue;
+          }
+          if (!notes.has(row.iccid)) {
+            cardCheckpointMismatch.push({ ...issue, fromCode: card.checkpointCode, detail: `card is currently held at ${card.checkpointCode}, not ${row.storeCode}; add a note to sell it from ${row.storeCode}` });
+            continue;
+          }
         }
         if (!row.msisdn) {
           msisdnMissing.push({ ...issue, detail: 'MSISDN is empty' }); continue;
@@ -1270,13 +1470,13 @@ class StockController {
         }
 
         msisdnSeen.set(row.msisdn, row.iccid);
-        toCreate.push({ ...row, cardID: card.id });
+        toCreate.push({ ...row, cardID: card.id, holderCode: card.checkpointCode, remark: crossLocation ? notes.get(row.iccid)! : null });
       }
 
       // Stock is drawn down once per checkpoint rather than once per card.
       const perCheckpoint = new Map<string, number>();
       for (const row of toCreate) {
-        perCheckpoint.set(row.storeCode, (perCheckpoint.get(row.storeCode) ?? 0) + 1);
+        perCheckpoint.set(row.holderCode, (perCheckpoint.get(row.holderCode) ?? 0) + 1);
       }
 
       const insufficientStock: RowIssue[] = [];
@@ -1284,7 +1484,7 @@ class StockController {
       // Anchor each stock shortfall to the first row for that store, so the message
       // still points somewhere findable in the sheet.
       const firstRowForStore = new Map<string, CreateRow>();
-      for (const r of toCreate) if (!firstRowForStore.has(r.storeCode)) firstRowForStore.set(r.storeCode, r);
+      for (const r of toCreate) if (!firstRowForStore.has(r.holderCode)) firstRowForStore.set(r.holderCode, r);
 
       if (perCheckpoint.size > 0) {
         const snapshots = await Promise.all(
@@ -1301,7 +1501,7 @@ class StockController {
               row: anchor?.row ?? 0,
               iccid: anchor?.iccid ?? '',
               storeCode: code,
-              detail: `store ${code} has ${amount} card(s) in stock but this file sells ${needed}`
+              detail: `${code} has ${amount} card(s) in stock but this file sells ${needed} from it`
             });
           } else {
             stockPlan.push({ checkpointCode: code, nextAmount: amount - needed });
@@ -1337,7 +1537,7 @@ class StockController {
           action: 'Validate the card at its checkpoint, then upload again.',
           items: neverValidated },
         { code: 'cardCheckpointMismatch', label: 'Card is still held at a different location',
-          action: 'Distribute or transfer the card to the store in STORE_CODE, or correct STORE_CODE to where the card actually is.',
+          action: 'Add a note for each of these cards to sell them from where they are held, or correct STORE_CODE to where the card actually is.',
           items: cardCheckpointMismatch },
         { code: 'duplicateMsisdn', label: 'The same MSISDN is used on more than one row',
           action: 'Each MSISDN can be sold once — remove or correct the duplicate.',
@@ -1411,7 +1611,17 @@ class StockController {
           failedRows,
           readyRows: Math.max(0, readyRows),
           errors: Object.fromEntries(
-            failed.map(b => [b.code, { label: b.label, action: b.action, ...errorBucket(b.items) }])
+            failed.map(b => [
+              b.code,
+              {
+                label: b.label,
+                action: b.action,
+                ...errorBucket(b.items),
+                // Cross-location sales: EVERY affected card (not capped), grouped by where the card is
+                // and where the file says it was sold, so the client can collect a note per card.
+                ...(b.code === 'cardCheckpointMismatch' ? { groups: groupByRoute(b.items) } : {})
+              }
+            ])
           )
         };
         throw err;
@@ -1461,7 +1671,7 @@ class StockController {
                 cardID: r.cardID,
                 type: 'SALE',
                 userCode,
-                sourceCode: r.storeCode,
+                sourceCode: r.holderCode,
                 targetCode: null
               }))
             });
@@ -1477,6 +1687,7 @@ class StockController {
                 cardKey: r.iccid,
                 numberKey: r.msisdn,
                 checkpointCode: r.storeCode,
+                remark: r.remark,
                 userCode,
                 TRN: r.trn,
                 soldAt,
@@ -1518,13 +1729,6 @@ class StockController {
     }
   }
 
-  static async downloadExcel(req: Request, res: Response, next: NextFunction) {
-    try {
-      
-    } catch (error) {
-      next(error);
-    }
-  }
 
   static async validateCard(req: Request, res: Response, next: NextFunction) {
     try {
@@ -1603,9 +1807,10 @@ class StockController {
           throw err;
         }
 
-        if (card.status === "UNVERIFIED") {
-          updateData.validatedAt = new Date();
-        }
+        // Only an UNVERIFIED card gets here (every other status was refused above), so this is
+        // always its first validation: it counts toward the batch progress, and a card that is
+        // marked good also enters stock for the first time (INITIAL movement, +1 stock).
+        updateData.validatedAt = new Date();
 
         const updatedCard = await tx.card.update({
           where: { key: key as string },
@@ -1616,70 +1821,35 @@ class StockController {
           where: { batchCode: card.uploadBatch.code },
           orderBy: { createdAt: 'desc' }
         });
+        await tx.uploadBatchProgress.create({
+          data: {
+            batchCode: card.uploadBatch.code,
+            progress: (lastProgress?.progress || 0) + 1
+          }
+        });
 
-        if (card.status === "UNVERIFIED" || card.status === "BROKEN" || card.status === "LOST") {
-          if (card.status === "UNVERIFIED") {
-            await tx.uploadBatchProgress.create({
+        if (nextStatus === "VERIFIED") {
+          const stock = await tx.cardStock.findFirst({
+            where: { checkpointCode: card.checkpointCode },
+            orderBy: { createdAt: 'desc' }
+          });
+          await Promise.all([
+            tx.cardMovement.create({
               data: {
-                batchCode: card.uploadBatch.code,
-                progress: (lastProgress?.progress || 0) + 1
+                cardID: card.id,
+                type: "INITIAL",
+                userCode: req.user.code,
+                sourceCode: null,
+                targetCode: card.checkpointCode
+              }
+            }),
+            tx.cardStock.create({
+              data: {
+                checkpointCode: card.checkpointCode,
+                amount: Number(stock?.amount || 0) + 1
               }
             })
-          }
-          if (nextStatus === "VERIFIED") {
-            const stock = await tx.cardStock.findFirst({
-              where: { checkpointCode: card.checkpointCode },
-              orderBy: { createdAt: 'desc' }
-            });
-            // UNVERIFIED → VERIFIED is the first time a card enters stock (INITIAL).
-            // BROKEN/LOST → VERIFIED is a re-entry after removal (RETURN).
-            const movementType = card.status === "UNVERIFIED" ? "INITIAL" : "RETURN";
-            await Promise.all([
-              tx.cardMovement.create({
-                data: {
-                  cardID: card.id,
-                  type: movementType,
-                  userCode: req.user.code,
-                  sourceCode: null,
-                  targetCode: card.checkpointCode
-                }
-              }),
-              tx.cardStock.create({
-                data: {
-                  checkpointCode: card.checkpointCode,
-                  amount: Number(stock?.amount || 0) + 1
-                }
-              })
-            ])
-          }
-        } else if (card.status === "VERIFIED") {
-          if (nextStatus === "UNVERIFIED" || nextStatus === "BROKEN" || nextStatus === "LOST") {
-            const stock = await tx.cardStock.findFirst({
-              where: { checkpointCode: card.checkpointCode },
-              orderBy: { createdAt: 'desc' }
-            });
-            await Promise.all([
-              tx.cardMovement.create({
-                data: {
-                  cardID: card.id,
-                  type: "ADJUSTMENT",
-                  userCode: req.user.code,
-                  sourceCode: card.checkpointCode,
-                  targetCode: null
-                }
-              }),
-              tx.cardStock.create({
-                data: {
-                  checkpointCode: card.checkpointCode,
-                  amount: Number(stock?.amount || 0) - 1
-                }
-              })
-            ])
-          }
-        } else {
-          const err = new Error('Invalid card status transition');
-          (err as any).status = 400;
-          throw err;
+          ]);
         }
 
         return updatedCard;
@@ -2003,28 +2173,12 @@ class StockController {
 
   static async getNumbers(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, checkpointCode, status, search, remark, sort } = req.query;
+      const { page = 1, limit = 10, checkpointCode, sort } = req.query;
       const circleCode = req.user!.circleCode;
 
-      // Numbers with no checkpoint are globally visible (available stock);
-      // numbers with a checkpoint are restricted to the user's circle.
-      const where: any = {
-        AND: [
-          { OR: [{ checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined) }, { checkpointCode: null }] }
-        ]
-      };
-      if (status) where.status = status;
-      if (search) {
-        where.OR = [
-          { key: { contains: search as string } },
-          { name: { contains: search as string } }
-        ];
-      }
-      if (remark) {
-        where.remark = {
-          contains: remark as string
-        }
-      }
+      // Shared with the Excel export so the file always matches the list
+      const where: any = buildNumberWhere(req.query, circleCode);
+      const onlyCode = csvParam(checkpointCode, 'checkpointCode');
       if (sort && sort !== "ASC" && sort !== "DESC") {
         const err = new Error("sort must be 'ASC' or 'DESC'");
         (err as any).status = 400;
@@ -2047,7 +2201,7 @@ class StockController {
 
       const numberAmountWhere = {
         OR: [
-          { checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined) },
+          { checkpoint: checkpointInCircle(circleCode, onlyCode.length === 1 ? onlyCode[0] : undefined) },
           { checkpointCode: null }
         ]
       };
@@ -2060,13 +2214,13 @@ class StockController {
         prisma.merge.count({
           where: {
             ...mergeAmountWhere,
-            createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
+            createdAt: { gte: wibMonthStart() }
           }
         }),
         prisma.merge.count({
           where: {
             ...mergeAmountWhere,
-            createdAt: { gte: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }
+            createdAt: { gte: wibToday() }
           }
         })
       ]);
@@ -2187,6 +2341,38 @@ class StockController {
     }
   }
 
+  // Sales per place for the Penjualan > Riwayat tab: every place in the caller's circle with
+  // how many sales it has in the date range, most sold first, one page at a time.
+  static async getSalesByCheckpoint(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { page = 1, limit = 20 } = req.query;
+      const circleCode = req.user!.circleCode;
+      const take = Math.min(100, Math.max(1, Number(limit) || 20));
+      const pageNumber = Math.max(1, Number(page) || 1);
+
+      // Shared with the Excel export
+      const ranked = await rankSalesByPlace(req.query, circleCode);
+
+      const total = ranked.length;
+      const items = ranked.slice((pageNumber - 1) * take, pageNumber * take);
+
+      res.status(200).json({
+        message: 'Sales by checkpoint retrieved successfully',
+        data: {
+          items,
+          summary: {
+            totalSold: ranked.reduce((sum, r) => sum + r.sold, 0),
+            activePlaces: ranked.filter(r => r.sold > 0).length,
+            totalPlaces: total
+          }
+        },
+        pagination: { page: pageNumber, limit: take, total, pages: Math.ceil(total / take) }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async getMerges(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, startSoldAt, endSoldAt, cardRemark, search, type } = req.query;
@@ -2197,13 +2383,13 @@ class StockController {
       };
       if (startSoldAt) {
         where.createdAt = {
-          gte: new Date(new Date(startSoldAt as string).setHours(0, 0, 0, 0))
+          gte: wibStartOfDay(String(startSoldAt))
         }
       }
       if (endSoldAt) {
         where.createdAt = {
           ...where.createdAt,
-          lte: new Date(new Date(endSoldAt as string).setHours(23, 59, 59, 999))
+          lte: wibEndOfDay(String(endSoldAt))
         }
       }
       const isSimcardQuery = type === "SIMCARD" || !type;
@@ -2236,8 +2422,8 @@ class StockController {
         });
       }
       const baseCountWhere = { checkpoint: checkpointInCircle(circleCode) };
-      const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-      const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+      const monthStart = wibMonthStart();
+      const dayStart = wibToday();
 
       const [total, monthly, daily] = isSimcardQuery
         ? await Promise.all([
