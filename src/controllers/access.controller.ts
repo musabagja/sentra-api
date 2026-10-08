@@ -27,9 +27,9 @@ class AccessController {
     try {
       const { page = 1, limit, search } = req.query;
 
-      // Granters only manage users in their own circle
+      // Granters only manage users in their own circle (a holder of the all-circles access: any circle)
       const where: Prisma.UserWhereInput = {
-        circleCode: req.user!.circleCode,
+        ...(req.allCircles ? {} : { circleCode: req.user!.circleCode }),
         status: 'ACTIVE'
       };
 
@@ -100,7 +100,7 @@ class AccessController {
       }
 
       const target = await prisma.user.findUnique({ where: { code: userCode } });
-      if (!target || target.circleCode !== req.user!.circleCode) {
+      if (!target || (!req.allCircles && target.circleCode !== req.user!.circleCode)) {
         const err = new Error('User not found');
         (err as any).status = 404;
         throw err;

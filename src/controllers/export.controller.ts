@@ -10,7 +10,7 @@ import {
 } from '../utils/list-filters.util';
 import { rankSalesByPlace } from '../utils/sales-ranking.util';
 import { assertExportSize, keysetPages, streamXlsx, wib } from '../utils/export.util';
-import { checkpointInCircle } from '../utils/access.util';
+import { checkpointInCircle, circleScope } from '../utils/access.util';
 import type { ExportColumn, ExportSheet } from '../utils/export.util';
 
 // Same Indonesian labels the pages show
@@ -49,7 +49,7 @@ export default class ExportController {
   // GET /api/stock/batches/export - Pengadaan: upload batches (+ detail=true: their ICCIDs and MSISDNs)
   static async batches(req: Request, res: Response, next: NextFunction) {
     try {
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
       const withDetail = req.query.detail === 'true';
       const where = buildBatchWhere(req.query, circleCode);
       assertExportSize(await prisma.uploadBatch.count({ where }));
@@ -187,7 +187,7 @@ export default class ExportController {
   // GET /api/stock/cards/export - Stok Barang, ICCID tab
   static async cards(req: Request, res: Response, next: NextFunction) {
     try {
-      const where = buildCardWhere(req.query, req.user!.circleCode);
+      const where = buildCardWhere(req.query, circleScope(req));
       assertExportSize(await prisma.card.count({ where }));
 
       const pages = keysetPages(
@@ -236,7 +236,7 @@ export default class ExportController {
   // GET /api/stock/numbers/export - Stok Barang, MSISDN tab
   static async numbers(req: Request, res: Response, next: NextFunction) {
     try {
-      const where = buildNumberWhere(req.query, req.user!.circleCode);
+      const where = buildNumberWhere(req.query, circleScope(req));
       assertExportSize(await prisma.number.count({ where }));
 
       const pages = keysetPages(
@@ -283,7 +283,7 @@ export default class ExportController {
   // GET /api/distribution/export - Jadwal Distribusi
   static async distributions(req: Request, res: Response, next: NextFunction) {
     try {
-      const where = buildDistributionWhere(req.query, req.user!.circleCode);
+      const where = buildDistributionWhere(req.query, circleScope(req));
       assertExportSize(await prisma.distribution.count({ where }));
 
       const pages = keysetPages(
@@ -335,7 +335,7 @@ export default class ExportController {
   // GET /api/checkpoint/export - Checkpoint
   static async checkpoints(req: Request, res: Response, next: NextFunction) {
     try {
-      const where = buildPlaceWhere(req.query, req.user!.circleCode);
+      const where = buildPlaceWhere(req.query, circleScope(req));
       assertExportSize(await prisma.checkpoint.count({ where }));
 
       // Circles are loaded per page of codes, never as one IN list over every checkpoint
@@ -396,7 +396,7 @@ export default class ExportController {
   // GET /api/stock/sales-by-checkpoint/export - Penjualan > Riwayat (+ detail=true: one row per sale)
   static async sales(req: Request, res: Response, next: NextFunction) {
     try {
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
       const withDetail = req.query.detail === 'true';
 
       const ranked = await rankSalesByPlace(req.query, circleCode);

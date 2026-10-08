@@ -5,7 +5,7 @@ import {
 import prisma from '../../lib/prisma';
 import * as xlsx from 'xlsx';
 
-import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from '../utils/access.util';
+import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle, circleScope } from '../utils/access.util';
 import { batchInScope, buildBatchWhere, buildCardWhere, buildNumberWhere, csvParam } from '../utils/list-filters.util';
 import { rankSalesByPlace } from '../utils/sales-ranking.util';
 
@@ -89,7 +89,7 @@ class StockController {
   static async dashboardSync (req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
       const dcCode    = req.query.dcCode    as string | undefined;
       const storeCode = req.query.storeCode as string | undefined;
 
@@ -367,7 +367,7 @@ class StockController {
   static async getDCDistributionChart(req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
       const now         = new Date();
@@ -418,7 +418,7 @@ class StockController {
   static async getStoreDistributionChart(req: Request, res: Response, next: NextFunction) {
     try {
       const allowed = req.checkpointCodes ?? [];
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
       const checkpointCode = req.query.checkpointCode as string | undefined;
 
       const now         = new Date();
@@ -469,7 +469,7 @@ class StockController {
   static async getBatch(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       const batch = await prisma.uploadBatch.findFirst({
         where: { id: Number(id), AND: [batchInScope(circleCode)] },
@@ -506,7 +506,7 @@ class StockController {
     try {
       const { id } = req.params;
       const { type = 'cards', page = 1, limit = 10, search } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       if (type !== 'cards' && type !== 'numbers') {
         const err = new Error("type must be 'cards' or 'numbers'");
@@ -576,7 +576,7 @@ class StockController {
   static async getBatches(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, status, search } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       const allowedStatus = ['ONGOING', 'COMPLETED'];
 
@@ -641,7 +641,7 @@ class StockController {
 
       const batch = await prisma.$transaction(async (tx) => {
         const currentBatch = await tx.uploadBatch.findFirst({
-          where: { id: Number(id), AND: [batchInScope(req.user!.circleCode)] }
+          where: { id: Number(id), AND: [batchInScope(circleScope(req))] }
         });
 
         if (!currentBatch) {
@@ -691,7 +691,7 @@ class StockController {
       const { id } = req.params;
 
       const batch = await prisma.uploadBatch.findFirst({
-        where: { id: Number(id), AND: [batchInScope(req.user!.circleCode)] },
+        where: { id: Number(id), AND: [batchInScope(circleScope(req))] },
         include: {
           cards: {
             select: { key: true, id: true, status: true, checkpointCode: true }
@@ -710,15 +710,16 @@ class StockController {
       // A batch that only carries MSISDNs is visible to everyone (numbers without a checkpoint are
       // shared stock) and is therefore not the caller's to delete; neither is one that holds cards
       // or numbers of another circle.
+      // (A holder of the all-circles access owns every circle, so none of this applies to them.)
       const mine = new Set(req.checkpointCodes ?? []);
-      if (batch.cards.length === 0) {
+      if (!req.allCircles && batch.cards.length === 0) {
         const err = new Error('Cannot delete a batch that has no ICCID: it is not tied to your circle');
         (err as any).status = 403;
         throw err;
       }
       const foreignCards = batch.cards.filter(c => !mine.has(c.checkpointCode)).length;
       const foreignNumbers = batch.numbers.filter(n => n.checkpointCode && !mine.has(n.checkpointCode)).length;
-      if (foreignCards > 0 || foreignNumbers > 0) {
+      if (!req.allCircles && (foreignCards > 0 || foreignNumbers > 0)) {
         const err = new Error(
           `Cannot delete batch: ${foreignCards + foreignNumbers} item(s) belong to another circle`
         );
@@ -807,7 +808,7 @@ class StockController {
   static async getCards(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10 } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       // Shared with the Excel export so the file always matches the list
       const where: any = buildCardWhere(req.query, circleCode);
@@ -2174,7 +2175,7 @@ class StockController {
   static async getNumbers(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, sort } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       // Shared with the Excel export so the file always matches the list
       const where: any = buildNumberWhere(req.query, circleCode);
@@ -2346,7 +2347,7 @@ class StockController {
   static async getSalesByCheckpoint(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 20 } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
       const take = Math.min(100, Math.max(1, Number(limit) || 20));
       const pageNumber = Math.max(1, Number(page) || 1);
 
@@ -2376,7 +2377,7 @@ class StockController {
   static async getMerges(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, startSoldAt, endSoldAt, cardRemark, search, type } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       let where: any = {
         checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined)

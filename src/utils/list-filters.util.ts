@@ -1,4 +1,4 @@
-import { checkpointInCircle } from './access.util';
+import { ALL_CIRCLES, checkpointInCircle } from './access.util';
 import { wibEndOfDay, wibStartOfDay } from './wib.util';
 
 /**
@@ -177,12 +177,13 @@ export const buildSoldRange = (query: any) => {
 export const batchInScope = (circleCode: string) => ({
   AND: [
     { NOT: { code: { startsWith: 'AUTOSOLD-' } } },
-    {
+    // Every circle: every procurement batch
+    ...(circleCode === ALL_CIRCLES ? [] : [{
       OR: [
         { cards: { some: { checkpoint: checkpointInCircle(circleCode) } } },
         { numbers: { some: { OR: [{ checkpoint: checkpointInCircle(circleCode) }, { checkpointCode: null }] } } }
       ]
-    }
+    }])
   ]
 });
 
