@@ -33,7 +33,7 @@ const generateUserCode = () =>
 // A user code is what the person types to sign in: letters and digits only, any case
 // (stored upper-case, so two codes can never differ only by letter case)
 const USER_CODE_PATTERN = /^[A-Z0-9]{4,20}$/;
-const USER_CODE_HINT = 'Use 4-20 characters: letters and digits only';
+const USER_CODE_HINT = 'Gunakan 4-20 karakter: hanya huruf dan angka';
 
 const normalizeUserCode = (value: unknown): string =>
   typeof value === 'string' ? value.trim().toUpperCase() : '';
@@ -43,22 +43,22 @@ const isUserCodeTaken = async (code: string) =>
 
 const cleanName = (value: unknown): string => {
   const name = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
-  if (!name) throw httpError(400, 'name is required');
-  if (name.length > MAX_NAME_LENGTH) throw httpError(400, `name must be at most ${MAX_NAME_LENGTH} characters`);
+  if (!name) throw httpError(400, 'Nama wajib diisi');
+  if (name.length > MAX_NAME_LENGTH) throw httpError(400, `Nama maksimal ${MAX_NAME_LENGTH} karakter`);
   return name;
 };
 
 const cleanPassword = (value: unknown): string => {
   if (typeof value !== 'string' || value.length < MIN_PASSWORD_LENGTH) {
-    throw httpError(400, `password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+    throw httpError(400, `Password minimal ${MIN_PASSWORD_LENGTH} karakter`);
   }
   return value;
 };
 
 const requireCircle = async (circleCode: unknown): Promise<string> => {
-  if (typeof circleCode !== 'string' || !circleCode) throw httpError(400, 'circleCode is required');
+  if (typeof circleCode !== 'string' || !circleCode) throw httpError(400, 'Circle wajib dipilih');
   const circle = await prisma.circle.findUnique({ where: { code: circleCode } });
-  if (!circle) throw httpError(400, `Unknown circle: ${circleCode}`);
+  if (!circle) throw httpError(400, `Circle tidak dikenal: ${circleCode}`);
   return circle.code;
 };
 
@@ -77,13 +77,13 @@ const callerAccessCodes = async (userCode: string): Promise<string[]> => {
  */
 const validateAccessCodes = async (value: unknown): Promise<string[]> => {
   if (!Array.isArray(value) || value.some((c) => typeof c !== 'string')) {
-    throw httpError(400, 'accessCodes must be an array of access codes');
+    throw httpError(400, 'Daftar akses tidak valid');
   }
   const requested: string[] = [...new Set(value as string[])];
 
   const restricted = requested.filter(isRestrictedAccess);
   if (restricted.length > 0) {
-    throw httpError(403, `These accesses can't be granted here: ${restricted.join(', ')}`);
+    throw httpError(403, `Akses ini tidak dapat diberikan lewat aplikasi: ${restricted.join(', ')}`);
   }
 
   const known = await prisma.access.findMany({
@@ -91,7 +91,7 @@ const validateAccessCodes = async (value: unknown): Promise<string[]> => {
     select: { code: true }
   });
   const unknown = requested.filter((c) => !known.some((a) => a.code === c));
-  if (unknown.length > 0) throw httpError(400, `Unknown access code(s): ${unknown.join(', ')}`);
+  if (unknown.length > 0) throw httpError(400, `Kode akses tidak dikenal: ${unknown.join(', ')}`);
 
   return requested;
 };
@@ -143,7 +143,7 @@ class UserAdminController {
           return;
         }
       }
-      throw httpError(503, 'Could not find a free code, try again');
+      throw httpError(503, 'Tidak menemukan kode yang masih kosong, coba lagi');
     } catch (error) {
       next(error);
     }
@@ -237,7 +237,7 @@ class UserAdminController {
           select: { createdAt: true }
         })
       ]);
-      if (!user) throw httpError(404, 'User not found');
+      if (!user) throw httpError(404, 'User tidak ditemukan');
 
       const { permissions, ...rest } = user;
       // Accesses of the Manajemen Akun menu are granted only in the database and never listed
@@ -268,7 +268,7 @@ class UserAdminController {
       const held = await callerAccessCodes(req.user!.code);
       const notHeld = accessCodes.filter((c) => !held.includes(c));
       if (notHeld.length > 0) {
-        throw httpError(403, `You cannot grant access you don't have: ${notHeld.join(', ')}`);
+        throw httpError(403, `Anda tidak dapat memberikan akses yang tidak Anda miliki: ${notHeld.join(', ')}`);
       }
 
       const passwordHash = Bcrypt.hash(password);
@@ -279,7 +279,7 @@ class UserAdminController {
         throw httpError(400, USER_CODE_HINT);
       }
       if (requestedCode && (await isUserCodeTaken(requestedCode))) {
-        throw httpError(409, 'This code is already used by another user');
+        throw httpError(409, 'Kode ini sudah dipakai user lain');
       }
 
       let user;
@@ -302,7 +302,7 @@ class UserAdminController {
           const isDuplicate =
             error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
           // Someone took the typed code between the check and the insert
-          if (isDuplicate && requestedCode) throw httpError(409, 'This code is already used by another user');
+          if (isDuplicate && requestedCode) throw httpError(409, 'Kode ini sudah dipakai user lain');
           if (!isDuplicate || attempt >= CODE_ATTEMPTS) throw error;
         }
       }
@@ -320,11 +320,11 @@ class UserAdminController {
     try {
       const code = String(req.params.code);
       const existing = await prisma.user.findUnique({ where: { code } });
-      if (!existing) throw httpError(404, 'User not found');
+      if (!existing) throw httpError(404, 'User tidak ditemukan');
 
       // The code is the sign-in name and the key of every record of the user: never changed
       if (req.body.code !== undefined && normalizeUserCode(req.body.code) !== existing.code.toUpperCase()) {
-        throw httpError(400, 'The code of a user cannot be changed');
+        throw httpError(400, 'Kode user tidak dapat diubah');
       }
 
       const { name, circleCode, accessCodes, password } = req.body;
@@ -352,7 +352,7 @@ class UserAdminController {
 
         const notHeld = [...toAdd, ...toRemove].filter((c) => !held.includes(c));
         if (notHeld.length > 0) {
-          throw httpError(403, `You cannot grant or revoke access you don't have: ${notHeld.join(', ')}`);
+          throw httpError(403, `Anda tidak dapat memberi atau mencabut akses yang tidak Anda miliki: ${notHeld.join(', ')}`);
         }
       }
 
@@ -394,11 +394,11 @@ class UserAdminController {
       try {
         const code = String(req.params.code);
         if (freeze && code === req.user!.code) {
-          throw httpError(400, 'You cannot freeze your own account');
+          throw httpError(400, 'Anda tidak dapat membekukan akun Anda sendiri');
         }
 
         const existing = await prisma.user.findUnique({ where: { code } });
-        if (!existing) throw httpError(404, 'User not found');
+        if (!existing) throw httpError(404, 'User tidak ditemukan');
 
         const user = await prisma.$transaction(async (tx) => {
           const updated = await tx.user.update({

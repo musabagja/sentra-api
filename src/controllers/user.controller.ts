@@ -246,21 +246,21 @@ class UserController {
       const { currentPassword, newPassword } = req.body ?? {};
 
       if (typeof currentPassword !== 'string' || !currentPassword) {
-        throw badRequest('Current password is required.', 'CURRENT_PASSWORD_REQUIRED');
+        throw badRequest('Isi password saat ini.', 'CURRENT_PASSWORD_REQUIRED');
       }
       if (typeof newPassword !== 'string' || newPassword.length < MIN_PASSWORD_LENGTH) {
-        throw badRequest(`New password must be at least ${MIN_PASSWORD_LENGTH} characters.`, 'PASSWORD_TOO_SHORT');
+        throw badRequest(`Password baru minimal ${MIN_PASSWORD_LENGTH} karakter.`, 'PASSWORD_TOO_SHORT');
       }
       if (Buffer.byteLength(newPassword) > MAX_PASSWORD_BYTES) {
-        throw badRequest(`New password must be at most ${MAX_PASSWORD_BYTES} bytes.`, 'PASSWORD_TOO_LONG');
+        throw badRequest('Password baru terlalu panjang.', 'PASSWORD_TOO_LONG');
       }
       if (newPassword === currentPassword) {
-        throw badRequest('New password must be different from the current one.', 'PASSWORD_UNCHANGED');
+        throw badRequest('Password baru harus berbeda dari password saat ini.', 'PASSWORD_UNCHANGED');
       }
 
       const user = await prisma.user.findUnique({ where: { code: req.user!.code } });
       if (!user?.password || !Bcrypt.compare(currentPassword, user.password)) {
-        throw badRequest('Current password is incorrect.', 'WRONG_CURRENT_PASSWORD');
+        throw badRequest('Password saat ini salah.', 'WRONG_CURRENT_PASSWORD');
       }
 
       // The session of this request stays signed in; all the others end

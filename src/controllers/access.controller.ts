@@ -27,9 +27,9 @@ class AccessController {
     try {
       const { page = 1, limit, search } = req.query;
 
-      // Granters only manage users in their own circle
+      // Granters only manage users in their own circle (a holder of the all-circles access: any circle)
       const where: Prisma.UserWhereInput = {
-        circleCode: req.user!.circleCode,
+        ...(req.allCircles ? {} : { circleCode: req.user!.circleCode }),
         status: 'ACTIVE'
       };
 
@@ -94,14 +94,14 @@ class AccessController {
       const { accessCodes } = req.body;
 
       if (!Array.isArray(accessCodes) || accessCodes.some((c) => typeof c !== 'string')) {
-        const err = new Error('accessCodes must be an array of access codes');
+        const err = new Error('Daftar akses tidak valid');
         (err as any).status = 400;
         throw err;
       }
 
       const target = await prisma.user.findUnique({ where: { code: userCode } });
-      if (!target || target.circleCode !== req.user!.circleCode) {
-        const err = new Error('User not found');
+      if (!target || (!req.allCircles && target.circleCode !== req.user!.circleCode)) {
+        const err = new Error('User tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -111,7 +111,7 @@ class AccessController {
       // User-menu accesses are granted only in the database
       const restrictedRequested = requested.filter(isRestrictedAccess);
       if (restrictedRequested.length > 0) {
-        const err = new Error(`These accesses can't be granted here: ${restrictedRequested.join(', ')}`);
+        const err = new Error(`Akses ini tidak dapat diberikan lewat aplikasi: ${restrictedRequested.join(', ')}`);
         (err as any).status = 403;
         throw err;
       }
@@ -122,7 +122,7 @@ class AccessController {
       });
       const unknown = requested.filter((c) => !known.some((a) => a.code === c));
       if (unknown.length > 0) {
-        const err = new Error(`Unknown access code(s): ${unknown.join(', ')}`);
+        const err = new Error(`Kode akses tidak dikenal: ${unknown.join(', ')}`);
         (err as any).status = 400;
         throw err;
       }
@@ -149,13 +149,13 @@ class AccessController {
 
       const notHeld = [...added, ...removed].filter((c) => !granterCodes.includes(c));
       if (notHeld.length > 0) {
-        const err = new Error(`You cannot grant or revoke access you don't have: ${notHeld.join(', ')}`);
+        const err = new Error(`Anda tidak dapat memberi atau mencabut akses yang tidak Anda miliki: ${notHeld.join(', ')}`);
         (err as any).status = 403;
         throw err;
       }
 
       if (target.code === req.user!.code && removed.includes(CHECKPOINT_MANAGE_ACCESS)) {
-        const err = new Error('You cannot remove your own access management permission');
+        const err = new Error('Anda tidak dapat mencabut akses pengelolaan akses milik Anda sendiri');
         (err as any).status = 400;
         throw err;
       }

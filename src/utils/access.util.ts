@@ -37,10 +37,31 @@ export const USER_ACCESS = {
   FREEZE: 'US04'
 } as const;
 
-const RESTRICTED_ACCESS_PREFIX = 'US';
+/**
+ * "Akses Semua Circle": the holder acts as if they belonged to every circle (super admin).
+ * Granted only in the database (see isRestrictedAccess), so nobody can give it from the app.
+ */
+export const ALL_CIRCLES_ACCESS = 'SA01';
+
+// Accesses with these prefixes are granted only directly in the database: they never appear in the
+// access list and can't be granted or revoked through the API. US = Manajemen Akun, SA = super admin.
+const RESTRICTED_ACCESS_PREFIXES = ['US', 'SA'];
 
 export const isRestrictedAccess = (code: string): boolean =>
-  code.startsWith(RESTRICTED_ACCESS_PREFIX);
+  RESTRICTED_ACCESS_PREFIXES.some((prefix) => code.startsWith(prefix));
+
+/**
+ * Stands in for a circle code to mean "every circle". Never a real code (those are names such as
+ * "EAST JAVA"), so it can travel through the same parameters as a circle code.
+ */
+export const ALL_CIRCLES = '*';
+
+/**
+ * The circle every scoping check of this request should use: the user's own circle, or ALL_CIRCLES
+ * for a holder of ALL_CIRCLES_ACCESS (loaded into req.allCircles by CheckpointAccess.load).
+ */
+export const circleScope = (req: { allCircles?: boolean; user?: { circleCode: string } }): string =>
+  req.allCircles ? ALL_CIRCLES : req.user!.circleCode;
 
 /** Status of a user who can't sign in and is signed out everywhere */
 export const USER_STATUS = { ACTIVE: 'ACTIVE', FROZEN: 'FROZEN' } as const;
@@ -88,7 +109,11 @@ export const resolveCheckpointFilter = (
 export const checkpointInCircle = (
   circleCode: string,
   requestedCode?: string
-) => ({
-  ...(requestedCode ? { code: requestedCode } : {}),
-  checkpointCircles: { some: { circleCode } }
-});
+) =>
+  circleCode === ALL_CIRCLES
+    ? // Every checkpoint: a condition that is always true (and safe on an optional relation)
+      { ...(requestedCode ? { code: requestedCode } : {}), id: { gt: 0 } }
+    : {
+        ...(requestedCode ? { code: requestedCode } : {}),
+        checkpointCircles: { some: { circleCode } }
+      };

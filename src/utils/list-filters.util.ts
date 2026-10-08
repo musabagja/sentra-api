@@ -1,4 +1,4 @@
-import { checkpointInCircle } from './access.util';
+import { ALL_CIRCLES, checkpointInCircle } from './access.util';
 import { wibEndOfDay, wibStartOfDay } from './wib.util';
 
 /**
@@ -36,11 +36,11 @@ export const csvParam = (
   const unique = [...new Set(parts)];
 
   if (unique.length > MAX_FILTER_VALUES) {
-    throw badRequest(`${name} accepts at most ${MAX_FILTER_VALUES} values`);
+    throw badRequest(`Filter ${name} maksimal ${MAX_FILTER_VALUES} pilihan`);
   }
   if (options.allowed) {
     const unknown = unique.find(v => !options.allowed!.includes(v));
-    if (unknown) throw badRequest(`${name} has an unknown value "${unknown}"`);
+    if (unknown) throw badRequest(`Filter ${name} berisi nilai yang tidak dikenal: "${unknown}"`);
   }
   return unique;
 };
@@ -177,12 +177,13 @@ export const buildSoldRange = (query: any) => {
 export const batchInScope = (circleCode: string) => ({
   AND: [
     { NOT: { code: { startsWith: 'AUTOSOLD-' } } },
-    {
+    // Every circle: every procurement batch
+    ...(circleCode === ALL_CIRCLES ? [] : [{
       OR: [
         { cards: { some: { checkpoint: checkpointInCircle(circleCode) } } },
         { numbers: { some: { OR: [{ checkpoint: checkpointInCircle(circleCode) }, { checkpointCode: null }] } } }
       ]
-    }
+    }])
   ]
 });
 

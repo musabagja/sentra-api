@@ -14,7 +14,7 @@ class Permissions {
         });
 
         if (!permission) {
-          const err = new Error('Forbidden');
+          const err = new Error('Anda tidak punya akses untuk melakukan tindakan ini');
           (err as any).status = 403;
           throw err;
         }

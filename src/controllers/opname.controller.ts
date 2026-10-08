@@ -2,7 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import { wibEndOfDay, wibStartOfDay } from '../utils/wib.util';
 import prisma from "../../lib/prisma";
 
-import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from "../utils/access.util";
+import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle, circleScope } from "../utils/access.util";
 
 class OpnameController {
   static async updateOpnameProgress(req: Request, res: Response, next: NextFunction) {
@@ -376,7 +376,7 @@ class OpnameController {
   static async getOpnames(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10, checkpointCode, type, startDate, endDate } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       const where: any = {
         checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined)

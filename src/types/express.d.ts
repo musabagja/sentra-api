@@ -19,6 +19,8 @@ declare global {
       user?: User;
       /** Checkpoint codes the authenticated user may access, loaded by CheckpointAccess.load */
       checkpointCodes?: string[];
+      /** True for a holder of ALL_CIRCLES_ACCESS: every circle check is bypassed */
+      allCircles?: boolean;
     }
   }
 }

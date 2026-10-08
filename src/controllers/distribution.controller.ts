@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { buildDistributionWhere } from '../utils/list-filters.util';
 import prisma from "../../lib/prisma";
-import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle } from "../utils/access.util";
+import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle, circleScope } from "../utils/access.util";
 
 class DistributionController {
   // ============================================================================
@@ -39,7 +39,7 @@ class DistributionController {
         throw err;
       }
 
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       const [distributions, cards, missingKeys] = await prisma.$transaction<[any[], any[], string[]]>(async (tx) => {
 
@@ -146,7 +146,7 @@ class DistributionController {
   static async getDistributions(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit = 10 } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       // Shared with the Excel export so the file always matches the list
       const where: any = buildDistributionWhere(req.query, circleCode);

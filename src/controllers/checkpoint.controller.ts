@@ -4,7 +4,7 @@ import { buildPlaceWhere } from '../utils/list-filters.util';
 import prisma from '../../lib/prisma';
 import { Prisma } from '../../generated/prisma/client';
 
-import { hasCheckpointAccess, checkpointInCircle } from '../utils/access.util';
+import { hasCheckpointAccess, checkpointInCircle, circleScope } from '../utils/access.util';
 
 const CODE_PREFIX: Record<string, string> = { DC: 'DC', HQ: 'HQ', STORE: 'ST' };
 
@@ -13,7 +13,7 @@ const CHECKPOINT_TYPES = ['DC', 'STORE', 'HQ'];
 // 2-12 characters: letters, digits and hyphens; stored uppercase. Existing codes
 // are 2-10 characters and a few use hyphens (IMO01-02).
 const CODE_PATTERN = /^[A-Z0-9][A-Z0-9-]{1,11}$/;
-const CODE_FORMAT_HINT = 'Use 2-12 characters: letters, digits or hyphens';
+const CODE_FORMAT_HINT = 'Gunakan 2-12 karakter: huruf, angka, atau tanda hubung';
 const MAX_SUGGESTION_STEPS = 500;
 
 const normalizeCheckpointCode = (raw: unknown): string =>
@@ -51,7 +51,7 @@ const generateCheckpointCode = async (type: string): Promise<string> => {
     const candidate = `${prefix}${String(max + step).padStart(width, '0')}`;
     if (!(await isCheckpointCodeTaken(candidate))) return candidate;
   }
-  throw new Error('Could not find an unused code');
+  throw new Error('Tidak menemukan kode yang masih kosong, coba lagi');
 };
 
 const httpError = (status: number, message: string) => {
@@ -69,22 +69,23 @@ const badRequest = (message: string) => {
 /**
  * Validates a list of circle codes: a non-empty string array (a checkpoint with
  * no circle would be visible to no one) whose codes all exist and that includes the
- * caller's own circle.
+ * caller's own circle. callerCircle is null for a holder of the all-circles access: no circle
+ * of their own to keep.
  */
-const validateCircleCodes = async (circleCodes: unknown, callerCircle: string) => {
+const validateCircleCodes = async (circleCodes: unknown, callerCircle: string | null) => {
   if (!Array.isArray(circleCodes) || circleCodes.some((c) => typeof c !== 'string')) {
-    throw badRequest('circleCodes must be an array of circle codes');
+    throw badRequest('Daftar circle tidak valid');
   }
 
   const linkedCircleCodes: string[] = [...new Set(circleCodes as string[])];
   if (linkedCircleCodes.length === 0) {
-    throw badRequest('Select at least one region');
+    throw badRequest('Pilih minimal satu circle');
   }
 
   // Access follows the circle: a checkpoint that leaves the caller's own circle would drop out of
   // their list (and out of their reach), and linking it into the circles of others is not theirs to do
-  if (!linkedCircleCodes.includes(callerCircle)) {
-    const err = new Error(`The checkpoint must stay in your own circle (${callerCircle})`);
+  if (callerCircle !== null && !linkedCircleCodes.includes(callerCircle)) {
+    const err = new Error(`Checkpoint harus tetap berada di circle Anda sendiri (${callerCircle})`);
     (err as any).status = 403;
     throw err;
   }
@@ -95,7 +96,7 @@ const validateCircleCodes = async (circleCodes: unknown, callerCircle: string) =
   });
   const unknown = linkedCircleCodes.filter((c) => !circles.some((circle) => circle.code === c));
   if (unknown.length > 0) {
-    throw badRequest(`Unknown region(s): ${unknown.join(', ')}`);
+    throw badRequest(`Circle tidak dikenal: ${unknown.join(', ')}`);
   }
 
   return { linkedCircleCodes, circles };
@@ -129,7 +130,7 @@ class CheckpointController {
     try {
       const type = String(req.query.type || '');
       if (!CHECKPOINT_TYPES.includes(type)) {
-        throw badRequest(`Invalid type. Must be one of: ${CHECKPOINT_TYPES.join(', ')}`);
+        throw badRequest(`Tipe tidak valid. Pilih salah satu: ${CHECKPOINT_TYPES.join(', ')}`);
       }
 
       res.status(200).json({
@@ -146,23 +147,27 @@ class CheckpointController {
       const { type, name, circleCodes = [] } = req.body;
 
       if (!type || !name) {
-        const err = new Error('type and name are required');
+        const err = new Error('Tipe dan nama wajib diisi');
         (err as any).status = 400;
         throw err;
       }
 
       if (!CHECKPOINT_TYPES.includes(type)) {
-        const err = new Error(`Invalid type. Must be one of: ${CHECKPOINT_TYPES.join(', ')}`);
+        const err = new Error(`Tipe tidak valid. Pilih salah satu: ${CHECKPOINT_TYPES.join(', ')}`);
         (err as any).status = 400;
         throw err;
       }
 
-      const { linkedCircleCodes, circles } = await validateCircleCodes(circleCodes, req.user!.circleCode);
+      const { linkedCircleCodes, circles } = await validateCircleCodes(
+        circleCodes,
+        req.allCircles ? null : req.user!.circleCode
+      );
       // A new checkpoint is linked to the caller's own circle only; linking it into the circles of
       // others is not theirs to do. Refused instead of silently dropped so the caller sees it.
+      // (A holder of the all-circles access links it wherever they choose.)
       const foreign = linkedCircleCodes.filter((c) => c !== req.user!.circleCode);
-      if (foreign.length > 0) {
-        throw httpError(403, `You can only add a checkpoint to your own circle (${req.user!.circleCode})`);
+      if (!req.allCircles && foreign.length > 0) {
+        throw httpError(403, `Anda hanya dapat menambahkan checkpoint ke circle Anda sendiri (${req.user!.circleCode})`);
       }
 
       // A code can be typed by the user; without one it is generated, as before
@@ -170,7 +175,7 @@ class CheckpointController {
       if (typedCode !== null) {
         if (!CODE_PATTERN.test(typedCode)) throw badRequest(CODE_FORMAT_HINT);
         if (await isCheckpointCodeTaken(typedCode)) {
-          throw httpError(409, `Code ${typedCode} is already used`);
+          throw httpError(409, `Kode ${typedCode} sudah digunakan`);
         }
       }
 
@@ -195,7 +200,7 @@ class CheckpointController {
           const isDuplicate =
             error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
           if (isDuplicate && typedCode !== null) {
-            throw httpError(409, `Code ${typedCode} is already used`);
+            throw httpError(409, `Kode ${typedCode} sudah digunakan`);
           }
           if (!isDuplicate || attempt >= MAX_ATTEMPTS) throw error;
         }
@@ -213,7 +218,7 @@ class CheckpointController {
   static async getCheckpoints(req: Request, res: Response, next: NextFunction) {
     try {
       const { page = 1, limit, startSoldAt, endSoldAt, withCircles } = req.query;
-      const circleCode = req.user!.circleCode;
+      const circleCode = circleScope(req);
 
       // Scope to the checkpoints the user's circle covers; type / circle / search narrow it.
       // Shared with the Excel export so the file always matches the list.
@@ -289,7 +294,7 @@ class CheckpointController {
   static async getOptions(req: Request, res: Response, next: NextFunction) {
     try {
       const options = await prisma.checkpoint.findMany({
-        where: buildPlaceWhere(req.query, req.user!.circleCode),
+        where: buildPlaceWhere(req.query, circleScope(req)),
         select: { code: true, name: true, type: true },
         orderBy: { name: 'asc' }
       });
@@ -323,7 +328,7 @@ class CheckpointController {
       });
 
       if (!checkpoint || !hasCheckpointAccess(checkpoint.code, allowed)) {
-        const err = new Error('Checkpoint not found');
+        const err = new Error('Checkpoint tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -356,12 +361,12 @@ class CheckpointController {
 
       const trimmedName = typeof name === 'string' ? name.trim() : undefined;
       if (name !== undefined && !trimmedName) {
-        throw badRequest('name cannot be empty');
+        throw badRequest('Nama tidak boleh kosong');
       }
 
       const existing = await prisma.checkpoint.findUnique({ where: { id: Number(id) } });
       if (!existing || !hasCheckpointAccess(existing.code, allowed)) {
-        const err = new Error('Checkpoint not found');
+        const err = new Error('Checkpoint tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -370,7 +375,11 @@ class CheckpointController {
       // they are: they can't be added here, and sending a list without them doesn't remove them.
       // The caller's own link exists already (that is how they reach the checkpoint) and must
       // stay (an unlinked checkpoint would drop out of their list).
-      if (circleCodes !== undefined) {
+      // A holder of the all-circles access sets the links freely (below).
+      let allCirclesLinks: string[] | null = null;
+      if (circleCodes !== undefined && req.allCircles) {
+        allCirclesLinks = (await validateCircleCodes(circleCodes, null)).linkedCircleCodes;
+      } else if (circleCodes !== undefined) {
         const { linkedCircleCodes } = await validateCircleCodes(circleCodes, req.user!.circleCode);
         const current = await prisma.checkpointCircle.findMany({
           where: { checkpointCode: existing.code },
@@ -380,13 +389,33 @@ class CheckpointController {
           (c) => c !== req.user!.circleCode && !current.some((link) => link.circleCode === c)
         );
         if (added.length > 0) {
-          throw httpError(403, `You cannot link this checkpoint to other circles: ${added.join(', ')}`);
+          throw httpError(403, `Anda tidak dapat menautkan checkpoint ini ke circle lain: ${added.join(', ')}`);
         }
       }
 
-      const checkpoint = await prisma.checkpoint.update({
-        where: { id: existing.id },
-        data: { ...(trimmedName && { name: trimmedName }) }
+      const checkpoint = await prisma.$transaction(async (tx) => {
+        const updated = await tx.checkpoint.update({
+          where: { id: existing.id },
+          data: { ...(trimmedName && { name: trimmedName }) }
+        });
+
+        if (allCirclesLinks) {
+          await tx.checkpointCircle.deleteMany({
+            where: { checkpointCode: existing.code, circleCode: { notIn: allCirclesLinks } }
+          });
+          const current = await tx.checkpointCircle.findMany({
+            where: { checkpointCode: existing.code },
+            select: { circleCode: true }
+          });
+          const toAdd = allCirclesLinks.filter((code) => !current.some((link) => link.circleCode === code));
+          if (toAdd.length > 0) {
+            await tx.checkpointCircle.createMany({
+              data: toAdd.map((circleCode) => ({ checkpointCode: existing.code, circleCode }))
+            });
+          }
+        }
+
+        return updated;
       });
 
       const regions =
@@ -415,7 +444,7 @@ class CheckpointController {
 
       const existing = await prisma.checkpoint.findUnique({ where: { id: Number(id) } });
       if (!existing || !hasCheckpointAccess(existing.code, allowed)) {
-        const err = new Error('Checkpoint not found');
+        const err = new Error('Checkpoint tidak ditemukan');
         (err as any).status = 404;
         throw err;
       }
@@ -443,7 +472,7 @@ class CheckpointController {
       ]);
 
       if (cards > 0) {
-        throw badRequest(`Cannot delete checkpoint: stock must be 0 (currently ${cards})`);
+        throw badRequest(`Checkpoint tidak dapat dihapus: stok harus 0 (saat ini ${cards})`);
       }
 
       // These records keep the checkpoint's history, so it can't be removed
@@ -455,7 +484,7 @@ class CheckpointController {
         numbers
       };
       if (Object.values(history).some((count) => count > 0)) {
-        const err = new Error('Cannot delete checkpoint: it still has history');
+        const err = new Error('Checkpoint tidak dapat dihapus karena masih punya riwayat');
         (err as any).status = 409;
         (err as any).details = history;
         throw err;

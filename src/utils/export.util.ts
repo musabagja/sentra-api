@@ -29,7 +29,7 @@ export type ExportSheet = {
 
 const tooMany = (count: number) => {
   const err = new Error(
-    `This export has ${count.toLocaleString('en-US')} rows, more than the ${MAX_EXPORT_ROWS.toLocaleString('en-US')} limit. Narrow the filters and try again.`
+    `Data yang diunduh berisi ${count.toLocaleString('id-ID')} baris, melebihi batas ${MAX_EXPORT_ROWS.toLocaleString('id-ID')} baris. Persempit filter lalu coba lagi.`
   );
   (err as any).status = 422;
   return err;

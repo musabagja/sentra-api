@@ -9,7 +9,7 @@ export const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
 const DAY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 const invalid = (value: unknown) => {
-  const err = new Error(`"${String(value)}" is not a valid date`);
+  const err = new Error(`Tanggal "${String(value)}" tidak valid`);
   (err as any).status = 422;
   return err;
 };
