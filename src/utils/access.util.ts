@@ -1,4 +1,51 @@
 /**
+ * Access code that lets a user create circles and checkpoints, and grant
+ * accesses to other users in their circle.
+ */
+export const CHECKPOINT_MANAGE_ACCESS = 'C04';
+
+/**
+ * Accesses of the Pengadaan (procurement) menu. The screens hide the buttons without them; the
+ * routes enforce them too, so the API cannot be called around the UI.
+ */
+export const PROCUREMENT_ACCESS = {
+  MENU: 'P01',
+  ADD_STOCK: 'P02',
+  VERIFY: 'P03',
+  DELETE_BATCH: 'P04'
+} as const;
+
+/**
+ * "Download Data" accesses: who may export each menu to Excel. Jadwal Distribusi and Pengadaan
+ * have none of their own, so they follow Stok Barang (the same stock data).
+ */
+export const DOWNLOAD_ACCESS = {
+  STOCK: 'SB02',
+  CHECKPOINT: 'C02',
+  SALES: 'S02'
+} as const;
+
+/**
+ * Accesses of the User menu. They are granted only directly in the database:
+ * they never appear in the access list and can't be granted or revoked through
+ * the API (see isRestrictedAccess).
+ */
+export const USER_ACCESS = {
+  MENU: 'US01',
+  ADD: 'US02',
+  EDIT: 'US03',
+  FREEZE: 'US04'
+} as const;
+
+const RESTRICTED_ACCESS_PREFIX = 'US';
+
+export const isRestrictedAccess = (code: string): boolean =>
+  code.startsWith(RESTRICTED_ACCESS_PREFIX);
+
+/** Status of a user who can't sign in and is signed out everywhere */
+export const USER_STATUS = { ACTIVE: 'ACTIVE', FROZEN: 'FROZEN' } as const;
+
+/**
  * Returns true when the given checkpointCode is within the caller's allowed set.
  *
  * allowNull=true handles the Numbers rule: a number with no checkpoint is

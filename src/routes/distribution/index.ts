@@ -1,5 +1,8 @@
 import express from 'express';
 import DistributionController from '../../controllers/distribution.controller';
+import ExportController from '../../controllers/export.controller';
+import Permissions from '../../middlewares/permission.handler';
+import { DOWNLOAD_ACCESS } from '../../utils/access.util';
 import upload, { generateImageURLs } from '../../utils/multer.config';
 const router = express.Router();
 
@@ -9,6 +12,9 @@ const router = express.Router();
 
 // POST /api/distribution - Create a new distribution
 router.post('/', DistributionController.createDistribution);
+
+// GET /api/distribution/export - Excel of the distributions (must stay before /:id)
+router.get('/export', Permissions.require(DOWNLOAD_ACCESS.STOCK), ExportController.distributions);
 
 // GET /api/distribution - Get all distributions with pagination and filtering
 router.get('/', DistributionController.getDistributions);

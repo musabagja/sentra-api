@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import JWT from "../utils/jwt.util";
 import prisma from "../../lib/prisma";
+import { USER_STATUS } from "../utils/access.util";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -37,13 +38,25 @@ class Auth {
       }
 
       const user = await prisma.user.findFirst({
-        where: {
-          code: decoded.code,
-          status: 'ACTIVE'
-        }
+        where: { code: decoded.code }
       });
 
       if (!user) {
+        const err = new Error('Unauthorized');
+        (err as any).status = 401;
+        throw err;
+      }
+
+      // A frozen user is signed out on their very next request; the client reads
+      // `code` to clear its state and return to the login page
+      if (user.status === USER_STATUS.FROZEN) {
+        const err = new Error('This account is frozen.');
+        (err as any).status = 401;
+        (err as any).code = 'ACCOUNT_FROZEN';
+        throw err;
+      }
+
+      if (user.status !== USER_STATUS.ACTIVE) {
         const err = new Error('Unauthorized');
         (err as any).status = 401;
         throw err;

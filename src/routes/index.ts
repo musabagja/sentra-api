@@ -5,6 +5,9 @@ import stockRouter from './stock';
 import opnameRouter from './opname';
 import distributionRouter from './distribution';
 import checkpointRouter from './checkpoint';
+import circleRouter from './circle';
+import accessRouter from './access';
+import usersRouter from './users';
 import errorHandler from '../middlewares/error.handler';
 import Auth from '../middlewares/auth.handler';
 import CheckpointAccess from '../middlewares/checkpoint-access.handler';
@@ -28,7 +31,10 @@ router.get("/", (req: any, res: any) => {
       stock: "/api/stock",
       opname: "/api/opname",
       distribution: "/api/distribution",
-      checkpoint: "/api/checkpoint"
+      checkpoint: "/api/checkpoint",
+      circle: "/api/circle",
+      access: "/api/access",
+      users: "/api/users"
     }
   });
 });
@@ -49,5 +55,13 @@ router.use('/distribution', distributionRouter);
 // Checkpoint routes
 router.use('/checkpoint', checkpointRouter);
 
+// Circle routes
+router.use('/circle', circleRouter);
+
+// Access granting routes
+router.use('/access', accessRouter);
+
+// User management routes (User menu)
+router.use('/users', usersRouter);
 
 export default router;
