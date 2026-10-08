@@ -15,6 +15,15 @@ router.post('/', DistributionController.createDistribution);
 
 // POST /api/distribution/upload/xlsx - Kirim via Excel: one file (ICCID, TARGET, TANGGAL_KIRIM) makes several batches.
 // Needs the access SB04, or the super-admin access SA01.
+// POST /api/distribution/upload/xlsx/preview - check the file first: the batches that would be created
+// and the rows that would not. Writes nothing. (Must stay before the upload route.)
+router.post(
+  '/upload/xlsx/preview',
+  Permissions.requireAny(DISTRIBUTION_ACCESS.SEND_EXCEL, ALL_CIRCLES_ACCESS),
+  upload('xlsx').single('source'),
+  DistributionController.previewDistributionExcel
+);
+
 router.post(
   '/upload/xlsx',
   Permissions.requireAny(DISTRIBUTION_ACCESS.SEND_EXCEL, ALL_CIRCLES_ACCESS),

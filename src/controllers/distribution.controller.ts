@@ -230,6 +230,218 @@ const createScheduledDistributions = async (
   return { batch, distributions };
 };
 
+const MAX_SAMPLE_ICCIDS = 50;
+// Rows listed in the check table; problems first, so a huge file still shows what must be fixed
+const MAX_PREVIEW_ROWS = 5000;
+
+type RowRead = {
+  row: number;
+  iccid: string;
+  targetText: string;
+  dateText: string;
+  targetCode: string | null; // the checkpoint's own code, when known
+  sendDate: Date | null;
+  problem: boolean; // this row already has a problem
+};
+
+type SendableCard = { key: string; checkpointCode: string };
+type SendGroup = { targetCode: string; sendDate: Date; lines: RowRead[] };
+
+/** The report of the rows that were not sent, grouped by problem; null when every row was sent */
+const buildFailures = (
+  problems: Partial<Record<UploadProblem, ProblemRow[]>>,
+  totalRows: number,
+  sentRows: number
+) => {
+  const failed = (Object.keys(problems) as UploadProblem[]).filter((code) => (problems[code]?.length ?? 0) > 0);
+  if (failed.length === 0) return null;
+  return {
+    totalRows,
+    sentRows,
+    failedRows: failed.reduce((sum, code) => sum + problems[code]!.length, 0),
+    errors: Object.fromEntries(
+      failed.map((code) => [
+        code,
+        {
+          label: UPLOAD_PROBLEMS[code].label,
+          action: UPLOAD_PROBLEMS[code].action,
+          count: problems[code]!.length,
+          items: problems[code]!.slice(0, MAX_ROWS_PER_PROBLEM),
+          truncated: Math.max(0, problems[code]!.length - MAX_ROWS_PER_PROBLEM)
+        }
+      ])
+    )
+  };
+};
+
+/**
+ * Reads the uploaded Kirim via Excel file and checks every row, without writing anything: the rows,
+ * their targets and dates, the cards, and the batches (rows with the same target and date). Used by the
+ * preview and by the upload so the two always agree. Rows of a batch that has a problem row are
+ * reported as "held back" too.
+ */
+const analyseExcelSend = async (req: Request) => {
+  const file = (req as any).file;
+  if (!req.user) throw httpError(401, 'User tidak ditemukan');
+  if (!file) throw httpError(400, 'Belum ada file yang diunggah');
+
+  // Read the file outside any transaction: parsing is CPU work and must not hold a DB connection
+  let shown: unknown[][];
+  let raw: unknown[][];
+  try {
+    const workbook = xlsx.read(file.buffer, { type: 'buffer' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0] ?? ''];
+    if (!sheet) throw new Error('no sheet');
+    // header:1 gives plain rows, so a file with only a header is still seen. raw:false keeps a long
+    // ICCID as the text Excel displays; raw:true is read too, only to recognise a real Excel date.
+    shown = xlsx.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: false, defval: '' });
+    raw = xlsx.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: '' });
+  } catch {
+    throw httpError(422, 'File tidak dapat dibaca. Pastikan file berformat .xlsx dan gunakan template.');
+  }
+
+  const header = (shown[0] ?? []).map((cell) => String(cell ?? '').trim().toUpperCase());
+  const col = { iccid: header.indexOf('ICCID'), target: header.indexOf('TARGET'), date: header.indexOf('TANGGAL_KIRIM') };
+  const missingColumns = (Object.entries({ ICCID: col.iccid, TARGET: col.target, TANGGAL_KIRIM: col.date }) as [string, number][])
+    .filter(([, index]) => index < 0)
+    .map(([name]) => name);
+  if (missingColumns.length > 0) {
+    throw httpError(422, `Kolom ${missingColumns.join(', ')} tidak ditemukan. Unduh template dan pertahankan nama kolomnya.`);
+  }
+
+  const dataRows = shown.slice(1);
+  if (dataRows.length > MAX_UPLOAD_ROWS) {
+    throw httpError(422, `File berisi lebih dari ${MAX_UPLOAD_ROWS.toLocaleString('id-ID')} baris. Bagi menjadi beberapa file.`);
+  }
+
+  const problems: Partial<Record<UploadProblem, ProblemRow[]>> = {};
+  const add = (code: UploadProblem, line: RowRead, detail?: string) => {
+    (problems[code] ??= []).push({
+      row: line.row,
+      iccid: line.iccid,
+      target: line.targetText,
+      date: line.dateText,
+      ...(detail ? { detail } : {})
+    });
+  };
+
+  // 1. Read the rows. Row numbers are the ones shown in Excel (the header is row 1).
+  const lines: RowRead[] = [];
+  const firstRowOf = new Map<string, number>();
+  dataRows.forEach((cells, i) => {
+    const row = i + 2;
+    const cell = (index: number) => String(cells[index] ?? '').trim();
+    const { key, unreadable } = normalizeKeyCell(cells[col.iccid]);
+    const targetText = cell(col.target);
+    const dateText = cell(col.date);
+    // A completely blank row is ignored
+    if (!key && !unreadable && !targetText && !dateText) return;
+
+    const line: RowRead = { row, iccid: key, targetText, dateText, targetCode: null, sendDate: null, problem: false };
+    lines.push(line);
+
+    if (unreadable) {
+      line.problem = true;
+      add('unreadableIccid', line, 'Excel menyimpan ICCID ini sebagai angka, sehingga digitnya sudah berubah');
+    } else if (!key) {
+      line.problem = true;
+      add('emptyIccid', line, 'ICCID kosong');
+    } else {
+      const first = firstRowOf.get(key.toUpperCase());
+      if (first !== undefined) {
+        line.problem = true;
+        add('duplicateIccid', line, `ICCID yang sama sudah ada di baris ${first}`);
+      } else firstRowOf.set(key.toUpperCase(), row);
+    }
+
+    if (!dateText && !(typeof (raw[i + 1] ?? [])[col.date] === 'number')) {
+      line.problem = true;
+      add('dateMissing', line, 'tanggal kirim kosong');
+    } else {
+      line.sendDate = parseSendDate((raw[i + 1] ?? [])[col.date], dateText);
+      if (!line.sendDate) {
+        line.problem = true;
+        add('dateInvalid', line, `tanggal "${dateText}" tidak dikenali`);
+      }
+    }
+  });
+
+  if (lines.length === 0) throw httpError(422, 'Tidak ada ICCID di dalam file');
+
+  // 2. The targets: every distinct code once
+  const targetTexts = [...new Set(lines.map((l) => l.targetText.toUpperCase()).filter(Boolean))];
+  const foundTargets = await fetchChunked(targetTexts, (codes) =>
+    prisma.checkpoint.findMany({ where: { code: { in: codes } }, select: { code: true, name: true, type: true } })
+  );
+  const targetByCode = new Map(foundTargets.map((t) => [t.code.toUpperCase(), t]));
+  for (const line of lines) {
+    if (!line.targetText) {
+      line.problem = true;
+      add('targetMissing', line, 'tujuan kosong');
+      continue;
+    }
+    const target = targetByCode.get(line.targetText.toUpperCase());
+    if (!target) {
+      line.problem = true;
+      add('targetNotFound', line, `tujuan ${line.targetText} tidak ditemukan`);
+    } else line.targetCode = target.code;
+  }
+
+  // 3. The cards: look every ICCID up (chunked)
+  const found = await fetchChunked([...firstRowOf.keys()], (keys) =>
+    prisma.card.findMany({
+      where: { key: { in: keys } },
+      select: { key: true, status: true, checkpointCode: true }
+    })
+  );
+  const cardByKey = new Map(found.map((card) => [card.key.toUpperCase(), card]));
+  // Compared ignoring letter case, like the database does
+  const myCheckpoints = new Set((req.checkpointCodes ?? []).map((code) => code.toUpperCase()));
+
+  const cardOf = new Map<number, SendableCard>(); // row -> card to send
+  for (const line of lines) {
+    if (line.problem || !line.iccid) continue;
+    const card = cardByKey.get(line.iccid.toUpperCase());
+    if (!card) {
+      line.problem = true;
+      add('cardNotFound', line, 'ICCID ini belum terdaftar di sistem');
+    } else if (!myCheckpoints.has(card.checkpointCode.toUpperCase())) {
+      // Where it is held is not revealed: it is not the caller's to see
+      line.problem = true;
+      add('cardOutOfScope', line, 'kartu tidak berada di lokasi Anda');
+    } else if (card.status !== 'VERIFIED') {
+      line.problem = true;
+      add(CARD_STATUS_PROBLEM[card.status] ?? 'cardOtherStatus', line, `status kartu ${card.status}`);
+    } else if (line.targetCode && card.checkpointCode.toUpperCase() === line.targetCode.toUpperCase()) {
+      line.problem = true;
+      add('cardAtTarget', line, `kartu sudah berada di ${card.checkpointCode}`);
+    } else {
+      cardOf.set(line.row, { key: card.key, checkpointCode: card.checkpointCode });
+    }
+  }
+
+  // 4. Batches: rows with the same target and date. A group with any problem row is held back, and
+  // its valid rows are reported as held so nothing is lost on the way.
+  const byKey = new Map<string, SendGroup>();
+  for (const line of lines) {
+    if (!line.targetCode || !line.sendDate) continue; // no batch to belong to
+    const key = `${line.targetCode.toUpperCase()}|${dayKey(line.sendDate)}`;
+    const group = byKey.get(key) ?? { targetCode: line.targetCode, sendDate: line.sendDate, lines: [] };
+    group.lines.push(line);
+    byKey.set(key, group);
+  }
+  const groups = [...byKey.values()];
+  for (const group of groups) {
+    if (!group.lines.some((l) => l.problem)) continue;
+    for (const l of group.lines) {
+      if (!l.problem) add('groupHeld', l, `batch ${group.targetCode} • ${dayKey(group.sendDate)} belum dibuat`);
+    }
+  }
+
+  return { lines, groups, problems, add, targetByCode, cardOf };
+};
+
+
 class DistributionController {
   // ============================================================================
   // DISTRIBUTION CRUD OPERATIONS
@@ -334,9 +546,109 @@ class DistributionController {
   }
 
   /**
-   * Kirim via Excel: one file creates several batches. Columns (first sheet): ICCID, TARGET (checkpoint
-   * code) and TANGGAL_KIRIM. Rows with the same target and date make one batch (DX-<n>), created like a
-   * scanned send (cards in DELIVERY, the receiver still does serah terima), without scanning each card.
+   * Kirim via Excel, step 1 ("Periksa file"): reads and checks the file exactly as the upload does and
+   * answers with the batches that would be created and the rows that would not. Writes nothing.
+   */
+  static async previewDistributionExcel(req: Request, res: Response, next: NextFunction) {
+    try {
+      const analysis = await analyseExcelSend(req);
+      const n = analysis.lines.length;
+
+      const batches = analysis.groups
+        .map((group) => {
+          const held = group.lines.some((l) => l.problem);
+          const bySource = new Map<string, number>();
+          const iccids: string[] = [];
+          for (const l of group.lines) {
+            const card = analysis.cardOf.get(l.row);
+            if (!card) continue;
+            bySource.set(card.checkpointCode, (bySource.get(card.checkpointCode) ?? 0) + 1);
+            iccids.push(card.key);
+          }
+          return {
+            key: `${group.targetCode.toUpperCase()}|${dayKey(group.sendDate)}`,
+            targetCode: group.targetCode,
+            targetName: analysis.targetByCode.get(group.targetCode.toUpperCase())?.name ?? group.targetCode,
+            scheduledAt: group.sendDate,
+            status: held ? ('held' as const) : ('ready' as const),
+            total: group.lines.length,
+            problemRows: group.lines.filter((l) => l.problem).length,
+            sources: [...bySource].map(([sourceCode, amount]) => ({ sourceCode, amount })),
+            sampleIccids: iccids.slice(0, MAX_SAMPLE_ICCIDS),
+            moreIccids: Math.max(0, iccids.length - MAX_SAMPLE_ICCIDS)
+          };
+        })
+        // Ready batches first, then by target and date
+        .sort(
+          (x, y) =>
+            Number(x.status === 'held') - Number(y.status === 'held') ||
+            x.targetCode.localeCompare(y.targetCode) ||
+            x.scheduledAt.getTime() - y.scheduledAt.getTime()
+        );
+
+      const readyRows = batches.filter((b) => b.status === 'ready').reduce((sum, b) => sum + b.total, 0);
+      const failures = buildFailures(analysis.problems, n, readyRows);
+
+      // One entry per Excel row for the table: bad rows (with their reason), then the rows held back
+      // with their batch, then the ready ones, each in file order
+      const reasonOf = new Map<number, { code: UploadProblem; detail?: string }>();
+      const heldRows = new Set<number>();
+      for (const code of Object.keys(analysis.problems) as UploadProblem[]) {
+        for (const item of analysis.problems[code] ?? []) {
+          if (code === 'groupHeld') heldRows.add(item.row);
+          else if (!reasonOf.has(item.row)) reasonOf.set(item.row, { code, ...(item.detail ? { detail: item.detail } : {}) });
+        }
+      }
+      const rank = (status: string) => (status === 'problem' ? 0 : status === 'held' ? 1 : 2);
+      const allRows = analysis.lines
+        .map((l) => {
+          const reason = reasonOf.get(l.row);
+          const status = reason ? ('problem' as const) : heldRows.has(l.row) ? ('held' as const) : ('ready' as const);
+          return {
+            row: l.row,
+            iccid: l.iccid,
+            target: l.targetText,
+            date: l.dateText,
+            batch: l.targetCode && l.sendDate ? `${l.targetCode.toUpperCase()}|${dayKey(l.sendDate)}` : null,
+            status,
+            ...(reason
+              ? {
+                  problem: {
+                    code: reason.code,
+                    label: UPLOAD_PROBLEMS[reason.code].label,
+                    action: UPLOAD_PROBLEMS[reason.code].action,
+                    ...(reason.detail ? { detail: reason.detail } : {})
+                  }
+                }
+              : {})
+          };
+        })
+        .sort((a, b) => rank(a.status) - rank(b.status) || a.row - b.row);
+
+      res.status(200).json({
+        message:
+          batches.some((b) => b.status === 'ready')
+            ? `${batches.filter((b) => b.status === 'ready').length} batch siap dibuat.`
+            : 'Belum ada batch yang bisa dibuat.',
+        data: {
+          totalRows: n,
+          readyRows,
+          problemRows: failures?.failedRows ?? 0,
+          batches,
+          failures,
+          rows: allRows.slice(0, MAX_PREVIEW_ROWS),
+          rowsTruncated: Math.max(0, allRows.length - MAX_PREVIEW_ROWS)
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Kirim via Excel, step 2 ("Buat batch"): one file creates several batches. Columns (first sheet): ICCID,
+   * TARGET (checkpoint code) and TANGGAL_KIRIM. Rows with the same target and date make one batch (DX-<n>),
+   * created like a scanned send (cards in DELIVERY, the receiver still does serah terima), without scanning.
    *
    * A batch is only created when every row of its target and date is valid. Rows with a problem (not
    * registered, sold, broken, lost, an unknown target, a bad date, ...) are reported with their row
@@ -345,174 +657,9 @@ class DistributionController {
    */
   static async uploadDistributionExcel(req: Request, res: Response, next: NextFunction) {
     try {
-      const file = (req as any).file;
-      if (!req.user) throw httpError(401, 'User tidak ditemukan');
-      if (!file) throw httpError(400, 'Belum ada file yang diunggah');
-
-      // Read the file outside the transaction: parsing is CPU work and must not hold a DB connection
-      let shown: unknown[][];
-      let raw: unknown[][];
-      try {
-        const workbook = xlsx.read(file.buffer, { type: 'buffer' });
-        const sheet = workbook.Sheets[workbook.SheetNames[0] ?? ''];
-        if (!sheet) throw new Error('no sheet');
-        // header:1 gives plain rows, so a file with only a header is still seen. raw:false keeps a long
-        // ICCID as the text Excel displays; raw:true is read too, only to recognise a real Excel date.
-        shown = xlsx.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: false, defval: '' });
-        raw = xlsx.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: '' });
-      } catch {
-        throw httpError(422, 'File tidak dapat dibaca. Pastikan file berformat .xlsx dan gunakan template.');
-      }
-
-      const header = (shown[0] ?? []).map((cell) => String(cell ?? '').trim().toUpperCase());
-      const col = { iccid: header.indexOf('ICCID'), target: header.indexOf('TARGET'), date: header.indexOf('TANGGAL_KIRIM') };
-      const missingColumns = (Object.entries({ ICCID: col.iccid, TARGET: col.target, TANGGAL_KIRIM: col.date }) as [string, number][])
-        .filter(([, index]) => index < 0)
-        .map(([name]) => name);
-      if (missingColumns.length > 0) {
-        throw httpError(422, `Kolom ${missingColumns.join(', ')} tidak ditemukan. Unduh template dan pertahankan nama kolomnya.`);
-      }
-
-      const dataRows = shown.slice(1);
-      if (dataRows.length > MAX_UPLOAD_ROWS) {
-        throw httpError(422, `File berisi lebih dari ${MAX_UPLOAD_ROWS.toLocaleString('id-ID')} baris. Bagi menjadi beberapa file.`);
-      }
-
-      const problems: Partial<Record<UploadProblem, ProblemRow[]>> = {};
-      const add = (code: UploadProblem, line: RowRead, detail?: string) => {
-        (problems[code] ??= []).push({
-          row: line.row,
-          iccid: line.iccid,
-          target: line.targetText,
-          date: line.dateText,
-          ...(detail ? { detail } : {})
-        });
-      };
-
-      type RowRead = {
-        row: number;
-        iccid: string;
-        targetText: string;
-        dateText: string;
-        targetCode: string | null; // the checkpoint's own code, when known
-        sendDate: Date | null;
-        problem: boolean; // this row already has a problem
-      };
-
-      // 1. Read the rows. Row numbers are the ones shown in Excel (the header is row 1).
-      const lines: RowRead[] = [];
-      const firstRowOf = new Map<string, number>();
-      dataRows.forEach((cells, i) => {
-        const row = i + 2;
-        const cell = (index: number) => String(cells[index] ?? '').trim();
-        const { key, unreadable } = normalizeKeyCell(cells[col.iccid]);
-        const targetText = cell(col.target);
-        const dateText = cell(col.date);
-        // A completely blank row is ignored
-        if (!key && !unreadable && !targetText && !dateText) return;
-
-        const line: RowRead = {
-          row,
-          iccid: key,
-          targetText,
-          dateText,
-          targetCode: null,
-          sendDate: null,
-          problem: false
-        };
-        lines.push(line);
-
-        if (unreadable) {
-          line.problem = true;
-          add('unreadableIccid', line, 'Excel menyimpan ICCID ini sebagai angka, sehingga digitnya sudah berubah');
-        } else if (!key) {
-          line.problem = true;
-          add('emptyIccid', line, 'ICCID kosong');
-        } else {
-          const first = firstRowOf.get(key.toUpperCase());
-          if (first !== undefined) {
-            line.problem = true;
-            add('duplicateIccid', line, `ICCID yang sama sudah ada di baris ${first}`);
-          } else firstRowOf.set(key.toUpperCase(), row);
-        }
-
-        if (!dateText && !(typeof (raw[i + 1] ?? [])[col.date] === 'number')) {
-          line.problem = true;
-          add('dateMissing', line, 'tanggal kirim kosong');
-        } else {
-          line.sendDate = parseSendDate((raw[i + 1] ?? [])[col.date], dateText);
-          if (!line.sendDate) {
-            line.problem = true;
-            add('dateInvalid', line, `tanggal "${dateText}" tidak dikenali`);
-          }
-        }
-      });
-
-      if (lines.length === 0) throw httpError(422, 'Tidak ada ICCID di dalam file');
-
-      // 2. The targets: every distinct code once
-      const targetTexts = [...new Set(lines.map((l) => l.targetText.toUpperCase()).filter(Boolean))];
-      const foundTargets = await fetchChunked(targetTexts, (codes) =>
-        prisma.checkpoint.findMany({ where: { code: { in: codes } }, select: { code: true, name: true, type: true } })
-      );
-      const targetByCode = new Map(foundTargets.map((t) => [t.code.toUpperCase(), t]));
-      for (const line of lines) {
-        if (!line.targetText) {
-          line.problem = true;
-          add('targetMissing', line, 'tujuan kosong');
-          continue;
-        }
-        const target = targetByCode.get(line.targetText.toUpperCase());
-        if (!target) {
-          line.problem = true;
-          add('targetNotFound', line, `tujuan ${line.targetText} tidak ditemukan`);
-        } else line.targetCode = target.code;
-      }
-
-      // 3. The cards: look every ICCID up (chunked)
-      const found = await fetchChunked([...firstRowOf.keys()], (keys) =>
-        prisma.card.findMany({
-          where: { key: { in: keys } },
-          select: { key: true, status: true, checkpointCode: true }
-        })
-      );
-      const cardByKey = new Map(found.map((card) => [card.key.toUpperCase(), card]));
-      // Compared ignoring letter case, like the database does
-      const myCheckpoints = new Set((req.checkpointCodes ?? []).map((code) => code.toUpperCase()));
-
-      type Sendable = { key: string; checkpointCode: string };
-      const cardOf = new Map<number, Sendable>(); // row -> card to send
-      for (const line of lines) {
-        if (line.problem || !line.iccid) continue;
-        const card = cardByKey.get(line.iccid.toUpperCase());
-        if (!card) {
-          line.problem = true;
-          add('cardNotFound', line, 'ICCID ini belum terdaftar di sistem');
-        } else if (!myCheckpoints.has(card.checkpointCode.toUpperCase())) {
-          // Where it is held is not revealed: it is not the caller's to see
-          line.problem = true;
-          add('cardOutOfScope', line, 'kartu tidak berada di lokasi Anda');
-        } else if (card.status !== 'VERIFIED') {
-          line.problem = true;
-          add(CARD_STATUS_PROBLEM[card.status] ?? 'cardOtherStatus', line, `status kartu ${card.status}`);
-        } else if (line.targetCode && card.checkpointCode.toUpperCase() === line.targetCode.toUpperCase()) {
-          line.problem = true;
-          add('cardAtTarget', line, `kartu sudah berada di ${card.checkpointCode}`);
-        } else {
-          cardOf.set(line.row, { key: card.key, checkpointCode: card.checkpointCode });
-        }
-      }
-
-      // 4. Batches: rows with the same target and date. A group with any problem row is held back.
-      type Group = { targetCode: string; sendDate: Date; lines: RowRead[] };
-      const groups = new Map<string, Group>();
-      for (const line of lines) {
-        if (!line.targetCode || !line.sendDate) continue; // no group to belong to
-        const key = `${line.targetCode.toUpperCase()}|${dayKey(line.sendDate)}`;
-        const group = groups.get(key) ?? { targetCode: line.targetCode, sendDate: line.sendDate, lines: [] };
-        group.lines.push(line);
-        groups.set(key, group);
-      }
+      const analysis = await analyseExcelSend(req);
+      const { lines, groups, problems, targetByCode, cardOf, add } = analysis;
+      const n = (v: number) => v.toLocaleString('id-ID');
 
       const created: {
         batch: string;
@@ -523,13 +670,8 @@ class DistributionController {
         distributions: { id: number; sourceCode: string; amount: number }[];
       }[] = [];
 
-      for (const group of groups.values()) {
-        const bad = group.lines.some((l) => l.problem);
-        if (bad) {
-          // The valid rows of a held-back batch are reported too, so nothing is lost on the way
-          for (const l of group.lines) if (!l.problem) add('groupHeld', l, `batch ${group.targetCode} • ${dayKey(group.sendDate)} belum dibuat`);
-          continue;
-        }
+      for (const group of groups) {
+        if (group.lines.some((l) => l.problem)) continue; // held back (already reported)
         const cards = group.lines.map((l) => cardOf.get(l.row)!).filter(Boolean);
         try {
           const result = await prisma.$transaction(
@@ -558,37 +700,13 @@ class DistributionController {
         }
       }
 
-      // 5. The report: what was sent, what was not and why
-      const failed = (Object.keys(problems) as UploadProblem[]).filter((code) => (problems[code]?.length ?? 0) > 0);
       const sentRows = created.reduce((sum, c) => sum + c.total, 0);
-      const failedRows = failed.reduce((sum, code) => sum + problems[code]!.length, 0);
-      const n = (v: number) => v.toLocaleString('id-ID');
-
-      const failures =
-        failed.length === 0
-          ? null
-          : {
-              totalRows: lines.length,
-              sentRows,
-              failedRows,
-              errors: Object.fromEntries(
-                failed.map((code) => [
-                  code,
-                  {
-                    label: UPLOAD_PROBLEMS[code].label,
-                    action: UPLOAD_PROBLEMS[code].action,
-                    count: problems[code]!.length,
-                    items: problems[code]!.slice(0, MAX_ROWS_PER_PROBLEM),
-                    truncated: Math.max(0, problems[code]!.length - MAX_ROWS_PER_PROBLEM)
-                  }
-                ])
-              )
-            };
+      const failures = buildFailures(problems, lines.length, sentRows);
 
       if (created.length === 0) {
         throw httpError(
           422,
-          `Tidak ada batch yang dibuat. ${n(failedRows)} dari ${n(lines.length)} baris bermasalah atau tertahan. ` +
+          `Tidak ada batch yang dibuat. ${n(failures?.failedRows ?? 0)} dari ${n(lines.length)} baris bermasalah atau tertahan. ` +
             'Perbaiki baris-baris tersebut di file Excel, lalu unggah lagi.',
           failures ?? { totalRows: lines.length, sentRows: 0, failedRows: 0, errors: {} }
         );
@@ -597,7 +715,7 @@ class DistributionController {
       res.status(201).json({
         message:
           `${n(created.length)} batch dibuat (${n(sentRows)} ICCID).` +
-          (failures ? ` ${n(failedRows)} baris belum dikirim, lihat laporan.` : ''),
+          (failures ? ` ${n(failures.failedRows)} baris belum dikirim, lihat laporan.` : ''),
         data: { created, failures, totalRows: lines.length, sentRows }
       });
     } catch (error) {
