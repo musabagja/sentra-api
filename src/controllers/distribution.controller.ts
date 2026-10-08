@@ -278,7 +278,7 @@ const buildFailures = (
  * Reads the uploaded Kirim via Excel file and checks every row, without writing anything: the rows,
  * their targets and dates, the cards, and the batches (rows with the same target and date). Used by the
  * preview and by the upload so the two always agree. Rows of a batch that has a problem row are
- * reported as "held back" too.
+ * reported; a batch is made of the valid cards of its target and date.
  */
 const analyseExcelSend = async (req: Request) => {
   const file = (req as any).file;
@@ -420,8 +420,8 @@ const analyseExcelSend = async (req: Request) => {
     }
   }
 
-  // 4. Batches: rows with the same target and date. A group with any problem row is held back, and
-  // its valid rows are reported as held so nothing is lost on the way.
+  // 4. Batches: rows with the same target and date. The cards with a problem are skipped (and
+  // reported); the batch is still created with the cards that are fine.
   const byKey = new Map<string, SendGroup>();
   for (const line of lines) {
     if (!line.targetCode || !line.sendDate) continue; // no batch to belong to
@@ -431,12 +431,6 @@ const analyseExcelSend = async (req: Request) => {
     byKey.set(key, group);
   }
   const groups = [...byKey.values()];
-  for (const group of groups) {
-    if (!group.lines.some((l) => l.problem)) continue;
-    for (const l of group.lines) {
-      if (!l.problem) add('groupHeld', l, `batch ${group.targetCode} • ${dayKey(group.sendDate)} belum dibuat`);
-    }
-  }
 
   return { lines, groups, problems, add, targetByCode, cardOf };
 };
@@ -556,11 +550,10 @@ class DistributionController {
 
       const batches = analysis.groups
         .map((group) => {
-          const held = group.lines.some((l) => l.problem);
           const bySource = new Map<string, number>();
           const iccids: string[] = [];
           for (const l of group.lines) {
-            const card = analysis.cardOf.get(l.row);
+            const card = l.problem ? undefined : analysis.cardOf.get(l.row);
             if (!card) continue;
             bySource.set(card.checkpointCode, (bySource.get(card.checkpointCode) ?? 0) + 1);
             iccids.push(card.key);
@@ -570,21 +563,17 @@ class DistributionController {
             targetCode: group.targetCode,
             targetName: analysis.targetByCode.get(group.targetCode.toUpperCase())?.name ?? group.targetCode,
             scheduledAt: group.sendDate,
-            status: held ? ('held' as const) : ('ready' as const),
-            total: group.lines.length,
+            status: 'ready' as const,
+            total: iccids.length,
             problemRows: group.lines.filter((l) => l.problem).length,
             sources: [...bySource].map(([sourceCode, amount]) => ({ sourceCode, amount })),
             sampleIccids: iccids.slice(0, MAX_SAMPLE_ICCIDS),
             moreIccids: Math.max(0, iccids.length - MAX_SAMPLE_ICCIDS)
           };
         })
-        // Ready batches first, then by target and date
-        .sort(
-          (x, y) =>
-            Number(x.status === 'held') - Number(y.status === 'held') ||
-            x.targetCode.localeCompare(y.targetCode) ||
-            x.scheduledAt.getTime() - y.scheduledAt.getTime()
-        );
+        // A group with no valid card makes no batch
+        .filter((b) => b.total > 0)
+        .sort((x, y) => x.targetCode.localeCompare(y.targetCode) || x.scheduledAt.getTime() - y.scheduledAt.getTime());
 
       const readyRows = batches.filter((b) => b.status === 'ready').reduce((sum, b) => sum + b.total, 0);
       const failures = buildFailures(analysis.problems, n, readyRows);
@@ -650,10 +639,10 @@ class DistributionController {
    * TARGET (checkpoint code) and TANGGAL_KIRIM. Rows with the same target and date make one batch (DX-<n>),
    * created like a scanned send (cards in DELIVERY, the receiver still does serah terima), without scanning.
    *
-   * A batch is only created when every row of its target and date is valid. Rows with a problem (not
+   * Rows with a problem (not
    * registered, sold, broken, lost, an unknown target, a bad date, ...) are reported with their row
-   * number, and so are the valid rows whose batch was held back because of them, so the person can
-   * fix just those rows and upload them again. The batches that are clean are created right away.
+   * number so the person can fix just those rows and upload them again. The batch is still created
+   * with the valid cards of its target and date.
    */
   static async uploadDistributionExcel(req: Request, res: Response, next: NextFunction) {
     try {
@@ -671,8 +660,9 @@ class DistributionController {
       }[] = [];
 
       for (const group of groups) {
-        if (group.lines.some((l) => l.problem)) continue; // held back (already reported)
-        const cards = group.lines.map((l) => cardOf.get(l.row)!).filter(Boolean);
+        // Cards with a problem are skipped (already reported); the batch is made of the others
+        const cards = group.lines.filter((l) => !l.problem).map((l) => cardOf.get(l.row)!).filter(Boolean);
+        if (cards.length === 0) continue;
         try {
           const result = await prisma.$transaction(
             (tx) =>
@@ -696,7 +686,7 @@ class DistributionController {
           });
         } catch (error) {
           // A card changed under us: nothing of this batch was written; report its rows and go on
-          for (const l of group.lines) add('groupFailed', l, `batch ${group.targetCode} • ${dayKey(group.sendDate)} gagal dibuat`);
+          for (const l of group.lines.filter((x) => !x.problem)) add('groupFailed', l, `batch ${group.targetCode} • ${dayKey(group.sendDate)} gagal dibuat`);
         }
       }
 
