@@ -86,10 +86,6 @@ const UPLOAD_PROBLEMS = {
     label: 'Kartu sudah berada di lokasi tujuan',
     action: 'Hapus kartu ini dari file, atau ganti TARGET.'
   },
-  groupHeld: {
-    label: 'Baris benar, tetapi batchnya belum dibuat',
-    action: 'Batch untuk tujuan dan tanggal ini tidak dibuat karena ada baris lain yang bermasalah. Perbaiki baris yang bermasalah, lalu unggah baris ini lagi bersamanya.'
-  },
   groupFailed: {
     label: 'Batch gagal dibuat saat diproses',
     action: 'Kartu berubah status saat diproses. Unggah baris ini sekali lagi.'
@@ -578,21 +574,18 @@ class DistributionController {
       const readyRows = batches.filter((b) => b.status === 'ready').reduce((sum, b) => sum + b.total, 0);
       const failures = buildFailures(analysis.problems, n, readyRows);
 
-      // One entry per Excel row for the table: bad rows (with their reason), then the rows held back
-      // with their batch, then the ready ones, each in file order
+      // One entry per Excel row for the table: bad rows (with their reason) first, then the ready
+      // ones, each in file order
       const reasonOf = new Map<number, { code: UploadProblem; detail?: string }>();
-      const heldRows = new Set<number>();
       for (const code of Object.keys(analysis.problems) as UploadProblem[]) {
         for (const item of analysis.problems[code] ?? []) {
-          if (code === 'groupHeld') heldRows.add(item.row);
-          else if (!reasonOf.has(item.row)) reasonOf.set(item.row, { code, ...(item.detail ? { detail: item.detail } : {}) });
+          if (!reasonOf.has(item.row)) reasonOf.set(item.row, { code, ...(item.detail ? { detail: item.detail } : {}) });
         }
       }
-      const rank = (status: string) => (status === 'problem' ? 0 : status === 'held' ? 1 : 2);
-      const allRows = analysis.lines
+            const allRows = analysis.lines
         .map((l) => {
           const reason = reasonOf.get(l.row);
-          const status = reason ? ('problem' as const) : heldRows.has(l.row) ? ('held' as const) : ('ready' as const);
+          const status = reason ? ('problem' as const) : ('ready' as const);
           return {
             row: l.row,
             iccid: l.iccid,
@@ -612,7 +605,7 @@ class DistributionController {
               : {})
           };
         })
-        .sort((a, b) => rank(a.status) - rank(b.status) || a.row - b.row);
+        .sort((a, b) => Number(a.status === 'ready') - Number(b.status === 'ready') || a.row - b.row);
 
       res.status(200).json({
         message:
