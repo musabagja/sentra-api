@@ -26,6 +26,14 @@ export const DOWNLOAD_ACCESS = {
 } as const;
 
 /**
+ * Kirim Barang (send goods) accesses of Stok Barang. SB03 is the scanned send (not enforced by the
+ * server); SB04 is the send from an Excel file, enforced on its upload route.
+ */
+export const DISTRIBUTION_ACCESS = {
+  SEND_EXCEL: 'SB04'
+} as const;
+
+/**
  * Accesses of the User menu. They are granted only directly in the database:
  * they never appear in the access list and can't be granted or revoked through
  * the API (see isRestrictedAccess).
