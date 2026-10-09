@@ -141,10 +141,24 @@ const httpError = (status: number, message: string, details?: unknown) => {
   return err;
 };
 
+// How long a send waits for another send that is numbering its batch (it holds the lock until it commits)
+const BATCH_LOCK_TIMEOUT_MS = 60000;
+
 /** The next batch number: from the highest existing <prefix>-<n>, ignoring any batch that is not one.
  *  Reading only the newest row breaks as soon as it was written by something else (a backfill, say):
  *  parseInt returns NaN and every later distribution inherits it as DV-NaN. */
 const nextBatchCode = async (tx: Prisma.TransactionClient, prefix: BatchPrefix) => {
+  // Two sends at the same moment would read the same highest number and get the same code. A
+  // transaction-scoped application lock makes them take turns: the next send waits here until the
+  // first one commits, then reads the number it wrote. (A unique index cannot do this job: the
+  // backfill batches legitimately repeat one code over many rows of the same source.)
+  const [lock] = await tx.$queryRawUnsafe<{ result: number }[]>(
+    `DECLARE @r int; EXEC @r = sp_getapplock @Resource = N'distribution-batch-${prefix}', @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = ${BATCH_LOCK_TIMEOUT_MS}; SELECT @r AS result;`
+  );
+  if (!lock || lock.result < 0) {
+    throw httpError(409, 'Sistem sedang membuat batch pengiriman lain. Coba kirim lagi sebentar lagi.');
+  }
+
   const batches = await tx.distribution.findMany({
     where: { batch: { startsWith: `${prefix}-` } },
     select: { batch: true }
