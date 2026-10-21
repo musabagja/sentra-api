@@ -8,6 +8,8 @@ import checkpointRouter from './checkpoint';
 import circleRouter from './circle';
 import accessRouter from './access';
 import usersRouter from './users';
+import inventoryRouter from './inventory';
+import minioRouter from './minio';
 import errorHandler from '../middlewares/error.handler';
 import Auth from '../middlewares/auth.handler';
 import CheckpointAccess from '../middlewares/checkpoint-access.handler';
@@ -63,5 +65,10 @@ router.use('/access', accessRouter);
 
 // User management routes (User menu)
 router.use('/users', usersRouter);
+
+router.use('/inventory', inventoryRouter);
+
+// MinIO storage routes (bucket management)
+router.use('/minio', minioRouter);
 
 export default router;

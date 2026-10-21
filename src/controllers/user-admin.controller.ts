@@ -3,7 +3,7 @@ import prisma from '../../lib/prisma';
 import { Prisma } from '../../generated/prisma/client';
 
 import Bcrypt from '../utils/bcrypt.util';
-import { USER_STATUS, isRestrictedAccess } from '../utils/access.util';
+import { USER_STATUS, isRestrictedAccess, ACCESS_DEPENDENCIES, accessDependencyMessage } from '../utils/access.util';
 
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_NAME_LENGTH = 120;
@@ -130,6 +130,18 @@ const validateAccessCodes = async (value: unknown): Promise<string[]> => {
   if (unknown.length > 0) throw httpError(400, `Kode akses tidak dikenal: ${unknown.join(', ')}`);
 
   return requested;
+};
+
+/**
+ * V-01a: some accesses only make sense on top of another one (Serah Terima V02 needs
+ * Akses Menu V01). The final set must satisfy every dependency or the save is refused.
+ */
+const assertAccessDependencies = (codes: string[]) => {
+  for (const [dependent, required] of Object.entries(ACCESS_DEPENDENCIES)) {
+    if (codes.includes(dependent) && !codes.includes(required)) {
+      throw httpError(400, accessDependencyMessage(dependent));
+    }
+  }
 };
 
 class UserAdminController {
@@ -305,6 +317,7 @@ class UserAdminController {
       const circleCode = await requireCircle(req.body.circleCode);
       const jabatan = cleanJabatan(req.body.jabatan);
       const accessCodes = await validateAccessCodes(req.body.accessCodes ?? []);
+      assertAccessDependencies(accessCodes);
 
       const held = await callerAccessCodes(req.user!.code);
       const notHeld = accessCodes.filter((c) => !held.includes(c));
@@ -383,6 +396,7 @@ class UserAdminController {
       let toRemove: string[] = [];
       if (accessCodes !== undefined) {
         const requested = await validateAccessCodes(accessCodes);
+        assertAccessDependencies(requested);
         const [held, current] = await Promise.all([
           callerAccessCodes(req.user!.code),
           callerAccessCodes(code)

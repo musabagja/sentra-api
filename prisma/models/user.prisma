@@ -25,6 +25,7 @@ model User {
   opnames                  Opname[]
   opnameUpdates            OpnameUpdate[]
   opnameSubmittances       OpnameSubmittance[]
+  inventoryTransactions    InventoryTransaction[]
 }
 
 model Access {
