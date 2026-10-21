@@ -28,9 +28,9 @@ const imageFilter = (req: any, file: any, cb: any) => {
     'image/gif',
     'image/webp'
   ];
-  
+
   const extname = path.extname(file.originalname).toLowerCase();
-  
+
   if (allowedMimes.includes(file.mimetype) || ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(extname)) {
     cb(null, true);
   } else {
@@ -38,19 +38,40 @@ const imageFilter = (req: any, file: any, cb: any) => {
   }
 };
 
-const fileSwitcher = (type: 'xlsx' | 'image') => {
+// Bukti barang masuk (Inventaris): foto JPG/PNG atau dokumen PDF, maks 5 MB (T-02a1)
+const proofFilter = (req: any, file: any, cb: any) => {
+  const allowedMimes = ['image/jpeg', 'image/png', 'application/pdf'];
+  const extname = path.extname(file.originalname).toLowerCase();
+
+  if (allowedMimes.includes(file.mimetype) || ['.jpg', '.jpeg', '.png', '.pdf'].includes(extname)) {
+    cb(null, true);
+  } else {
+    cb(new Error('File harus JPG/PNG/PDF dan kurang dari 5 MB'), false);
+  }
+};
+
+// File storage MinIO: semua jenis file diterima (tetap maks 5 MB seperti konvensi project)
+const anyFilter = (req: any, file: any, cb: any) => {
+  cb(null, true);
+};
+
+const fileSwitcher = (type: 'xlsx' | 'image' | 'proof' | 'any') => {
   switch (type) {
     case 'xlsx':
       return xlsxFilter;
     case 'image':
       return imageFilter;
+    case 'proof':
+      return proofFilter;
+    case 'any':
+      return anyFilter;
     default:
       return xlsxFilter;
   }
 }
 
 // Initialize multer
-const upload = (type: 'xlsx' | 'image') => multer({
+const upload = (type: 'xlsx' | 'image' | 'proof' | 'any') => multer({
   storage,
   fileFilter: fileSwitcher(type),
   limits: {
