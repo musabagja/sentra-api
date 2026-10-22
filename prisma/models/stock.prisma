@@ -233,6 +233,10 @@ model DistributionSubmittance {
   note           String?
   recipientName  String?
   recipientURL   String?
+  // Marked as delivered by an admin ("Tandai Terkirim") instead of a serah terima on site
+  isManual       Boolean   @default(false)
+  // The handover day the admin entered (only for isManual)
+  handoverAt     DateTime?
   createdAt      DateTime  @default(now())
 
   distribution Distribution @relation("DistributionSubmittance", fields: [distributionID], references: [id], onUpdate: NoAction, onDelete: NoAction)

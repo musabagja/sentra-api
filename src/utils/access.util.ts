@@ -73,6 +73,13 @@ export const USER_ACCESS = {
  */
 export const ALL_CIRCLES_ACCESS = 'SA01';
 
+/**
+ * "Tandai Terkirim" on Jadwal Distribusi: an admin records schedules as delivered when the goods
+ * arrived but the serah terima was never done in the app. Granted only in the database (SA prefix,
+ * see isRestrictedAccess), so it never shows in Manajemen Akun.
+ */
+export const MANUAL_HANDOVER_ACCESS = 'SA02';
+
 // Accesses with these prefixes are granted only directly in the database: they never appear in the
 // access list and can't be granted or revoked through the API. US = Manajemen Akun, SA = super admin.
 const RESTRICTED_ACCESS_PREFIXES = ['US', 'SA'];

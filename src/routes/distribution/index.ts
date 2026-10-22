@@ -2,7 +2,7 @@ import express from 'express';
 import DistributionController from '../../controllers/distribution.controller';
 import ExportController from '../../controllers/export.controller';
 import Permissions from '../../middlewares/permission.handler';
-import { ALL_CIRCLES_ACCESS, DISTRIBUTION_ACCESS, DOWNLOAD_ACCESS } from '../../utils/access.util';
+import { ALL_CIRCLES_ACCESS, DISTRIBUTION_ACCESS, DOWNLOAD_ACCESS, MANUAL_HANDOVER_ACCESS } from '../../utils/access.util';
 import upload, { generateImageURLs } from '../../utils/multer.config';
 const router = express.Router();
 
@@ -42,6 +42,10 @@ router.get('/:id/items', DistributionController.getDistributionItems);
 
 // GET /api/distribution/:id - Get a specific distribution by ID
 router.get('/:id', DistributionController.getDistribution);
+
+// PUT /api/distribution/submit-manual - "Tandai Terkirim": an admin (SA02) records several Terjadwal schedules
+// as delivered at once ({ids, handoverAt: 'YYYY-MM-DD', note}). Must stay before /:id.
+router.put('/submit-manual', Permissions.require(MANUAL_HANDOVER_ACCESS), DistributionController.submitManualDistributions);
 
 // PUT /api/distribution/:id - Update a specific distribution
 router.put('/:id', DistributionController.updateDistribution);
