@@ -434,7 +434,8 @@ export default class ExportController {
               orderBy: { id: 'desc' },
               select: {
                 id: true, soldAt: true, createdAt: true, checkpointCode: true, numberKey: true, cardKey: true,
-                remark: true, verifiedAt: true, checkpoint: { select: { name: true } },
+                remark: true, verifiedAt: true, anomalyNote: true, anomalyAt: true,
+                checkpoint: { select: { name: true } },
                 number: { select: { remark: true } }
               }
             }),
@@ -451,7 +452,8 @@ export default class ExportController {
             { header: 'Nomor ICCID', key: 'iccid', width: 24 },
             { header: 'Kategori', key: 'category', width: 30 },
             { header: 'Catatan', key: 'remark', width: 34 },
-            { header: 'Status', key: 'status', width: 20 }
+            { header: 'Status', key: 'status', width: 20 },
+            { header: 'Anomali', key: 'anomaly', width: 30 }
           ] as ExportColumn[],
           rows: numbered(mapChunks(pages, rows => rows.map(m => ({
             soldAt: wib(m.soldAt ?? m.createdAt),
@@ -461,7 +463,45 @@ export default class ExportController {
             iccid: m.cardKey,
             category: m.number?.remark ?? '',
             remark: m.remark ?? '',
-            status: m.verifiedAt ? 'TerAktivasi' : 'Menunggu Aktivasi'
+            status: m.verifiedAt ? 'TerAktivasi' : 'Menunggu Aktivasi',
+            anomaly: m.anomalyAt ? (m.anomalyNote ?? 'Ditandai anomali') : ''
+          }))))
+        });
+
+        const otherPages = keysetPages(
+          ({ where, take }) =>
+            prisma.mergeAdditional.findMany({
+              where,
+              take,
+              orderBy: { id: 'desc' },
+              select: {
+                id: true, soldAt: true, createdAt: true, checkpointCode: true, type: true,
+                remark: true, verifiedAt: true, anomalyNote: true, anomalyAt: true,
+                checkpoint: { select: { name: true } }
+              }
+            }),
+          detailWhere
+        );
+        sheets.push({
+          name: 'Lainnya',
+          columns: [
+            NO,
+            { header: 'Tgl Terjual', key: 'soldAt', width: 16, type: 'date' },
+            { header: 'Kode Toko', key: 'placeCode', width: 14 },
+            { header: 'Nama Toko', key: 'placeName', width: 34 },
+            { header: 'Tipe', key: 'type', width: 20 },
+            { header: 'Catatan', key: 'remark', width: 34 },
+            { header: 'Status', key: 'status', width: 20 },
+            { header: 'Anomali', key: 'anomaly', width: 30 }
+          ] as ExportColumn[],
+          rows: numbered(mapChunks(otherPages, rows => rows.map(m => ({
+            soldAt: wib(m.soldAt ?? m.createdAt),
+            placeCode: m.checkpointCode ?? '',
+            placeName: m.checkpoint?.name ?? '',
+            type: m.type ?? '',
+            remark: m.remark ?? '',
+            status: m.verifiedAt ? 'TerAktivasi' : 'Menunggu Aktivasi',
+            anomaly: m.anomalyAt ? (m.anomalyNote ?? 'Ditandai anomali') : ''
           }))))
         });
       }

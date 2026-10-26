@@ -6,6 +6,16 @@ import { USER_STATUS } from '../utils/access.util';
 
 const isProduction = process.env.NODE_ENV === "production";
 
+const readToken = (req: Request, cookieName: 'access_token' | 'refresh_token', bodyKey?: string): string | undefined => {
+  const cookie = isProduction ? (req.signedCookies as any)[cookieName] : (req.cookies as any)[cookieName];
+  if (cookie) return cookie;
+  if (bodyKey) {
+    const fromBody = (req.body ?? {})[bodyKey];
+    if (typeof fromBody === 'string' && fromBody) return fromBody;
+  }
+  return /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1] ?? undefined;
+};
+
 const MIN_PASSWORD_LENGTH = 8;
 // bcrypt only reads the first 72 bytes, so a longer password would silently be cut
 const MAX_PASSWORD_BYTES = 72;
@@ -111,7 +121,9 @@ class UserController {
           userName: user.name,
           userImageURL: user.imageURL,
           userCode: user.code,
-          accesses: user.permissions.map(each => each.access)
+          accesses: user.permissions.map(each => each.access),
+          accessToken,
+          refreshToken
         }
       });
     } catch (error) {
@@ -121,9 +133,7 @@ class UserController {
 
   static async refreshToken(req: Request, res: Response, next: NextFunction) {
     try {
-      const refreshToken = isProduction
-        ? req.signedCookies["refresh_token"]
-        : req.cookies["refresh_token"];
+      const refreshToken = readToken(req, 'refresh_token', 'refreshToken');
 
       if (!refreshToken) {
         const err = new Error('Session expired, please sign in again.');
@@ -199,7 +209,10 @@ class UserController {
       res.cookie('refresh_token', newRefreshToken, cookieOptions(SESSION_TTL_MS));
       res.cookie('access_token', newAccessToken, cookieOptions(15 * 60 * 1000));
 
-      res.status(200).json({ message: 'Refresh token successful' });
+      res.status(200).json({
+        message: 'Refresh token successful',
+        data: { accessToken: newAccessToken, refreshToken: newRefreshToken }
+      });
     } catch (error) {
       next(error);
     }
@@ -207,9 +220,7 @@ class UserController {
 
   static async signOut(req: Request, res: Response, next: NextFunction) {
     try {
-      const refreshToken = isProduction
-        ? req.signedCookies["refresh_token"]
-        : req.cookies["refresh_token"];
+      const refreshToken = readToken(req, 'refresh_token', 'refreshToken');
 
       if (!refreshToken) {
         const err = new Error('Session already signed out.');

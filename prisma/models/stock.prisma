@@ -22,6 +22,7 @@ model Checkpoint {
   mergeAdditionals        MergeAdditional[]
   checkpointCircles       CheckpointCircle[]
   opnames                 Opname[]
+  opnameLock              StoreOpnameLock?
 }
 
 model Card {
@@ -114,6 +115,9 @@ model Merge {
   soldAt         DateTime?
   createdAt      DateTime  @default(now())
   verifiedAt     DateTime?
+  anomalyNote    String?
+  anomalyAt      DateTime?
+  anomalyByCode  String?
 
   card       Card        @relation(fields: [cardKey], references: [key], onUpdate: NoAction, onDelete: NoAction)
   number     Number      @relation(fields: [numberKey], references: [key], onUpdate: NoAction, onDelete: NoAction)
@@ -135,6 +139,9 @@ model MergeAdditional {
   soldAt         DateTime?
   createdAt      DateTime  @default(now())
   verifiedAt     DateTime?
+  anomalyNote    String?
+  anomalyAt      DateTime?
+  anomalyByCode  String?
 
   checkpoint Checkpoint? @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
   user       User        @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
@@ -266,6 +273,7 @@ model Opname {
   type           String
   checkpointCode String
   userCode       String
+  startedAt      DateTime?
   createdAt      DateTime @default(now())
 
   updates     OpnameUpdate[]
@@ -305,6 +313,7 @@ model OpnameUpdate {
   status    String
   opnameID  Int
   userCode  String
+  source    String?
   createdAt DateTime @default(now())
 
   opname Opname @relation(fields: [opnameID], references: [id], onUpdate: NoAction, onDelete: NoAction)
@@ -312,3 +321,16 @@ model OpnameUpdate {
 
   @@index([itemID])
 }
+
+model StoreOpnameLock {
+  id             Int       @id @default(autoincrement())
+  checkpointCode String    @unique
+  status         String    @default("IDLE")
+  lockedByCode   String?
+  lockedAt       DateTime?
+  expiresAt      DateTime?
+  updatedAt      DateTime  @updatedAt
+
+  checkpoint Checkpoint @relation(fields: [checkpointCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+}
+

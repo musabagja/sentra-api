@@ -152,7 +152,7 @@ export interface UploadedFile {
 }
 
 // Presigned GET links are valid for 7 days; clients re-request the file URL when expired
-const FILE_URL_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
+export const FILE_URL_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
 
 /** The bucket a file call works on: the one in the payload, or MINIO_BUCKET from .env */
 export const resolveBucket = (value?: unknown): string =>
@@ -179,6 +179,23 @@ const fileUrl = async (bucket: string, fileName: string): Promise<string> => {
     return '';
   }
 };
+
+export const presignedFileUrl = async (fileName: string): Promise<string> =>
+  fileUrl(resolveBucket(), fileName);
+
+export const isStoredObjectName = (value: string): boolean =>
+  !/^https?:\/\//i.test(value) && !value.startsWith('/') && !value.startsWith('uploads/');
+
+export const resolveStoredFileUrl = async (value: string | null | undefined): Promise<string | null> => {
+  if (!value) return null;
+  const raw = value.trim();
+  if (!raw) return null;
+  if (!isStoredObjectName(raw)) return raw;
+  const url = await presignedFileUrl(raw);
+  return url || raw;
+};
+
+export const ensureStoredFile = async (fileName: string) => requireFileStat(resolveBucket(), fileName);
 
 /** Uploads one new file. The object name is generated (uuid + timestamp + original name,
  *  same shape as the reference service) so stored names stay unguessable. */

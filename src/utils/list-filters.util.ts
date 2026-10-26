@@ -60,10 +60,12 @@ export const buildCardWhere = (query: any, circleCode: string) => {
   const codes = csvParam(query.checkpointCode, 'checkpointCode');
   const statuses = csvParam(query.status, 'status', { allowed: CARD_STATUSES, upper: true });
   const batches = csvParam(query.batch, 'batch');
+  const keys = csvParam(query.keys, 'keys');
   const { search, uploadAt, validatedAt } = query;
 
   const where: any = { checkpoint: scopedCheckpoint(circleCode, codes) };
   if (statuses.length) where.status = statuses.length === 1 ? statuses[0] : { in: statuses };
+  if (keys.length) where.key = { in: keys };
   if (search) {
     where.OR = [{ key: { contains: search as string } }, { name: { contains: search as string } }];
   }
@@ -93,6 +95,7 @@ export const buildNumberWhere = (query: any, circleCode: string) => {
   const codes = csvParam(query.checkpointCode, 'checkpointCode');
   const statuses = csvParam(query.status, 'status', { allowed: NUMBER_STATUSES, upper: true });
   const remarks = csvParam(query.remark, 'remark');
+  const keys = csvParam(query.keys, 'keys');
   const { search } = query;
 
   // Numbers with no checkpoint are globally visible (available stock);
@@ -101,6 +104,7 @@ export const buildNumberWhere = (query: any, circleCode: string) => {
     AND: [{ OR: [{ checkpoint: scopedCheckpoint(circleCode, codes) }, { checkpointCode: null }] }]
   };
   if (statuses.length) where.status = statuses.length === 1 ? statuses[0] : { in: statuses };
+  if (keys.length) where.AND.push({ key: { in: keys } });
   // Both conditions go into AND: each of them can be an OR of its own, and two ORs cannot
   // share one `where.OR` key
   if (search) {
