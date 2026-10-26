@@ -8,9 +8,11 @@ const isProduction = process.env.NODE_ENV === "production";
 class Auth {
   static async authenticate(req: Request, res: Response, next: NextFunction) {
     try {
-      const token = isProduction
+      const cookieToken = isProduction
         ? req.signedCookies["access_token"]
         : req.cookies["access_token"];
+      const bearerToken = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1];
+      const token = cookieToken ?? bearerToken;
 
       if (!token) {
         const err = new Error('Unauthorized');

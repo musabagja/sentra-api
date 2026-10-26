@@ -76,9 +76,13 @@ router.post('/merges/bulk', StockController.bulkMergeSim);
 
 router.get('/merges', StockController.getMerges);
 
+router.get('/merges/:id', StockController.getMerge);
+
 // GET /api/stock/sales-by-checkpoint - Sales per place, most sold first (Penjualan > Riwayat)
 router.get('/sales-by-checkpoint/export', Permissions.require(DOWNLOAD_ACCESS.SALES), ExportController.sales);
 router.get('/sales-by-checkpoint', StockController.getSalesByCheckpoint);
+
+router.get('/sales-report', StockController.getSalesReport);
 
 // GET /api/stock/dashboard - Get dashboard data
 router.get('/dashboard', StockController.dashboardSync);

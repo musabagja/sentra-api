@@ -2324,7 +2324,7 @@ class StockController {
 
   static async getMerges(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, checkpointCode, startSoldAt, endSoldAt, cardRemark, search, type } = req.query;
+      const { page = 1, limit = 10, checkpointCode, startSoldAt, endSoldAt, cardRemark, search, type, anomaly, keys } = req.query;
       const circleCode = circleScope(req);
 
       let where: any = {
@@ -2351,6 +2351,11 @@ class StockController {
         } else {
           where.cardKey = { contains: search as string };
         }
+      }
+      if (anomaly === 'true') where.anomalyAt = { not: null };
+      const keyList = csvParam(keys, 'keys');
+      if (keyList.length) {
+        where.AND = [...(where.AND ?? []), { OR: [{ cardKey: { in: keyList } }, { numberKey: { in: keyList } }] }];
       }
       let merges
 
@@ -2389,7 +2394,11 @@ class StockController {
       res.status(200).json({
         message: 'Merges retrieved successfully',
         data: {
-          merges,
+          merges: merges.map((merge: any) => ({
+            ...merge,
+            status: merge.verifiedAt ? 'Teraktivasi' : 'Menunggu Aktivasi',
+            isAnomaly: !!merge.anomalyAt
+          })),
           amount: { total, monthly, daily }
         },
         pagination: {
@@ -2397,6 +2406,123 @@ class StockController {
           limit: Number(limit),
           total,
           pages: Math.ceil(total / Number(limit))
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async getMerge(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = Number(req.params.id);
+      const circleCode = circleScope(req);
+      const isSimcardQuery = req.query.type === 'SIMCARD' || !req.query.type;
+
+      const merge: any = isSimcardQuery
+        ? await prisma.merge.findFirst({
+            where: { id, checkpoint: checkpointInCircle(circleCode) },
+            include: {
+              number: true,
+              card: true,
+              checkpoint: { select: { code: true, name: true, type: true } },
+              user: { select: { code: true, name: true } }
+            }
+          })
+        : await prisma.mergeAdditional.findFirst({
+            where: { id, checkpoint: checkpointInCircle(circleCode) },
+            include: {
+              checkpoint: { select: { code: true, name: true, type: true } },
+              user: { select: { code: true, name: true } }
+            }
+          });
+      if (!merge) {
+        const err = new Error('Penjualan tidak ditemukan');
+        (err as any).status = 404;
+        throw err;
+      }
+
+      res.status(200).json({
+        message: 'Merge retrieved successfully',
+        data: {
+          merge: {
+            ...merge,
+            status: merge.verifiedAt ? 'Teraktivasi' : 'Menunggu Aktivasi',
+            isAnomaly: !!merge.anomalyAt
+          }
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async getSalesReport(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { startSoldAt, endSoldAt } = req.query;
+      const gte = startSoldAt ? wibStartOfDay(String(startSoldAt)) : wibMonthStart();
+      const lte = endSoldAt ? wibEndOfDay(String(endSoldAt)) : undefined;
+      if (startSoldAt && endSoldAt) {
+        const days = (Number(lte) - Number(gte)) / (24 * 60 * 60 * 1000);
+        if (days > 31) {
+          const err = new Error('Rentang tanggal maksimal 31 hari');
+          (err as any).status = 400;
+          throw err;
+        }
+      }
+
+      const periodWhere: any = { userCode: req.user!.code, createdAt: { gte, ...(lte && { lte }) } };
+      const anomalyWhere = { ...periodWhere, anomalyAt: { not: null } };
+
+      const [cards, others, cardAnomalies, otherAnomalies, cardTotal, cardMonthly, cardDaily, otherTotal, otherMonthly, otherDaily] =
+        await Promise.all([
+          prisma.merge.groupBy({ by: ['checkpointCode'], where: periodWhere, _count: { _all: true } }),
+          prisma.mergeAdditional.groupBy({ by: ['checkpointCode'], where: periodWhere, _count: { _all: true } }),
+          prisma.merge.groupBy({ by: ['checkpointCode'], where: anomalyWhere, _count: { _all: true } }),
+          prisma.mergeAdditional.groupBy({ by: ['checkpointCode'], where: anomalyWhere, _count: { _all: true } }),
+          prisma.merge.count({ where: { userCode: req.user!.code } }),
+          prisma.merge.count({ where: { userCode: req.user!.code, createdAt: { gte: wibMonthStart() } } }),
+          prisma.merge.count({ where: { userCode: req.user!.code, createdAt: { gte: wibToday() } } }),
+          prisma.mergeAdditional.count({ where: { userCode: req.user!.code } }),
+          prisma.mergeAdditional.count({ where: { userCode: req.user!.code, createdAt: { gte: wibMonthStart() } } }),
+          prisma.mergeAdditional.count({ where: { userCode: req.user!.code, createdAt: { gte: wibToday() } } })
+        ]);
+
+      const perStore = new Map<string | null, { cardCount: number; otherCount: number; anomalyCount: number }>();
+      const bump = (code: string | null, field: 'cardCount' | 'otherCount' | 'anomalyCount', count: number) => {
+        const row = perStore.get(code) ?? { cardCount: 0, otherCount: 0, anomalyCount: 0 };
+        row[field] += count;
+        perStore.set(code, row);
+      };
+      for (const g of cards) bump(g.checkpointCode, 'cardCount', g._count._all);
+      for (const g of others) bump(g.checkpointCode, 'otherCount', g._count._all);
+      for (const g of cardAnomalies) bump(g.checkpointCode, 'anomalyCount', g._count._all);
+      for (const g of otherAnomalies) bump(g.checkpointCode, 'anomalyCount', g._count._all);
+
+      const codes = [...perStore.keys()].filter((code): code is string => !!code);
+      const checkpoints = await prisma.checkpoint.findMany({
+        where: { code: { in: codes } },
+        select: { code: true, name: true, type: true }
+      });
+      const byCode = new Map(checkpoints.map((c) => [c.code, c]));
+
+      const stores = [...perStore.entries()]
+        .map(([code, counts]) => ({
+          checkpointCode: code ?? '',
+          name: code ? (byCode.get(code)?.name ?? '') : '',
+          type: code ? (byCode.get(code)?.type ?? '') : '',
+          ...counts
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      res.status(200).json({
+        message: 'Sales report retrieved successfully',
+        data: {
+          stores,
+          amount: {
+            cards: { total: cardTotal, monthly: cardMonthly, daily: cardDaily },
+            others: { total: otherTotal, monthly: otherMonthly, daily: otherDaily }
+          }
         }
       });
     } catch (error) {
