@@ -1,5 +1,6 @@
 import express from 'express';
 import upload from '../../utils/multer.config';
+import ProdisSecret from '../../middlewares/prodis-secret.handler';
 import { prodisErrorHandler, prodisRateLimit } from '../../utils/prodis.util';
 import ProdisAuthController from '../../controllers/prodis-auth.controller';
 import ProdisInventoryController from '../../controllers/prodis-inventory.controller';
@@ -10,6 +11,8 @@ import ProdisFileController from '../../controllers/prodis-file.controller';
 const router = express.Router();
 
 router.use(prodisRateLimit);
+
+router.use(ProdisSecret.authenticate);
 
 router.post('/auth/sign-in', ProdisAuthController.signIn);
 
