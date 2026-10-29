@@ -68,14 +68,25 @@ class ProdisInventoryController {
   static async access(req: Request, res: Response, next: NextFunction) {
     try {
       const employee = await resolveEmployee(req.query.nrk);
+      const permissions = await prisma.permission.findMany({
+        where: { userCode: employee.code, status: true },
+        select: { accessCode: true }
+      });
+      const granted = new Set(permissions.map((permission) => permission.accessCode));
+      const menus = [
+        { key: 'stockOpname', code: 'SO01' },
+        { key: 'inventory', code: 'SB01' },
+        { key: 'sales', code: 'S01' }
+      ].map(({ key, code }) => ({
+        key,
+        enabled: granted.has(code),
+        reason: null
+      }));
+
       prodisOk(res, {
         employee: { nrk: employee.code, name: employee.name },
-        hasAccess: true,
-        menus: [
-          { key: 'stockOpname', enabled: true, reason: null },
-          { key: 'inventory', enabled: true, reason: null },
-          { key: 'sales', enabled: true, reason: null }
-        ]
+        hasAccess: menus.some((menu) => menu.enabled),
+        menus
       });
     } catch (error) {
       next(error);
