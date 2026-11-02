@@ -192,7 +192,7 @@ let fixturesCreated = false;
     assert.equal(bucket.count, 1);
     assert.match(bucket.samples[0].detail, /UNVERIFIED/);
     assert.equal(bucket.samples[0].row, 2);
-    assert.match(bucket.action, /Validate the card/);
+    assert.match(bucket.action, /Verifikasi kartu di checkpoint/);
   });
 
   it('reports an ICCID that Excel stored as a number instead of text', async () => {
@@ -209,7 +209,7 @@ let fixturesCreated = false;
     assert.equal(res.status, 422);
     const bucket = res.body.details.errors.unreadableIccid;
     assert.equal(bucket.count, 1);
-    assert.match(bucket.action, /Format the ICCID column as Text/);
-    assert.match(res.body.message, /could not be processed/);
+    assert.match(bucket.action, /Ubah format kolom ICCID menjadi Teks/);
+    assert.match(res.body.message, /tidak dapat diproses/);
   });
 });
