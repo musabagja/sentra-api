@@ -20,23 +20,30 @@ class Auth {
         throw err;
       }
 
-      let decoded: { code: string; session?: string };
+      let decoded: { code?: unknown; session?: unknown; aud?: unknown };
       try {
-        decoded = JWT.verify(token) as { code: string; session?: string };
+        decoded = JWT.verify(token) as { code?: unknown; session?: unknown; aud?: unknown };
       } catch {
         const err = new Error('Unauthorized');
         (err as any).status = 401;
         throw err;
       }
 
+      // Only access tokens from sign-in / refresh are accepted: they always carry both `code` and
+      // `session` and no audience. This rejects refresh tokens (no code, which would otherwise make
+      // findFirst match an arbitrary user) and PJP tokens (aud "pjp", no session).
+      if (typeof decoded.code !== 'string' || typeof decoded.session !== 'string' || decoded.aud !== undefined) {
+        const err = new Error('Unauthorized');
+        (err as any).status = 401;
+        throw err;
+      }
+
       // Reject tokens whose session was invalidated by sign-out
-      if (decoded.session) {
-        const session = await prisma.session.findFirst({ where: { id: decoded.session } });
-        if (!session) {
-          const err = new Error('Unauthorized');
-          (err as any).status = 401;
-          throw err;
-        }
+      const session = await prisma.session.findFirst({ where: { id: decoded.session } });
+      if (!session) {
+        const err = new Error('Unauthorized');
+        (err as any).status = 401;
+        throw err;
       }
 
       const user = await prisma.user.findFirst({

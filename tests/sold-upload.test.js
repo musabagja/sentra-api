@@ -79,7 +79,11 @@ let fixturesCreated = false;
     });
 
     fixturesCreated = true;
-    token = JWT.sign({ code: USER }, { expiresIn: '1h' });
+    // Auth only accepts access tokens tied to a live session
+    const session = await prisma.session.create({
+      data: { userCode: USER, expiresAt: new Date(Date.now() + 60 * 60 * 1000) }
+    });
+    token = JWT.sign({ code: USER, session: session.id }, { expiresIn: '1h' });
   });
 
   after(async () => {
@@ -98,6 +102,7 @@ let fixturesCreated = false;
     await prisma.uploadBatch.deleteMany({ where: { code: BATCH } });
     await prisma.checkpointCircle.deleteMany({ where: { circleCode: CIRCLE } });
     await prisma.checkpoint.deleteMany({ where: { code: STORE } });
+    await prisma.session.deleteMany({ where: { userCode: USER } });
     await prisma.user.deleteMany({ where: { code: USER } });
     await prisma.circle.deleteMany({ where: { code: CIRCLE } });
     await prisma.$disconnect();
