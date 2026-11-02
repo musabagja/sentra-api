@@ -34,6 +34,28 @@ export const DISTRIBUTION_ACCESS = {
 } as const;
 
 /**
+ * Visibility (Inventaris, barang non SIM card) accesses. V02 depends on V01: the form refuses to
+ * grant Serah Terima without Akses Menu (V-01a), and the routes enforce it too.
+ */
+export const VISIBILITY_ACCESS = {
+  MENU: 'V01',
+  HANDOVER: 'V02'
+} as const;
+
+/** Accesses that may only be granted together with another access (dependent -> required) */
+export const ACCESS_DEPENDENCIES: Record<string, string> = {
+  [VISIBILITY_ACCESS.HANDOVER]: VISIBILITY_ACCESS.MENU
+};
+
+/** Human-readable label of a dependency violation (the V-01a validation message) */
+export const accessDependencyMessage = (dependent: string): string => {
+  if (dependent === VISIBILITY_ACCESS.HANDOVER) {
+    return 'Centang "Akses Menu" Visibility dulu untuk memberi akses Serah Terima.';
+  }
+  return `Akses ${dependent} membutuhkan akses lain terlebih dahulu.`;
+};
+
+/**
  * Accesses of the User menu. They are granted only directly in the database:
  * they never appear in the access list and can't be granted or revoked through
  * the API (see isRestrictedAccess).
@@ -50,6 +72,13 @@ export const USER_ACCESS = {
  * Granted only in the database (see isRestrictedAccess), so nobody can give it from the app.
  */
 export const ALL_CIRCLES_ACCESS = 'SA01';
+
+/**
+ * "Tandai Terkirim" on Jadwal Distribusi: an admin records schedules as delivered when the goods
+ * arrived but the serah terima was never done in the app. Granted only in the database (SA prefix,
+ * see isRestrictedAccess), so it never shows in Manajemen Akun.
+ */
+export const MANUAL_HANDOVER_ACCESS = 'SA02';
 
 // Accesses with these prefixes are granted only directly in the database: they never appear in the
 // access list and can't be granted or revoked through the API. US = Manajemen Akun, SA = super admin.

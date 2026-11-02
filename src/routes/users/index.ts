@@ -28,6 +28,9 @@ router.post('/', Permissions.require(USER_ACCESS.ADD), UserAdminController.creat
 router.get('/code-check', Permissions.require(USER_ACCESS.ADD), UserAdminController.checkCode);
 router.get('/code-suggestion', Permissions.require(USER_ACCESS.ADD), UserAdminController.suggestCode);
 
+// POST /api/users/freeze-bulk - Nonaktifkan banyak user sekaligus (must stay before /:code)
+router.post('/freeze-bulk', Permissions.require(USER_ACCESS.FREEZE), UserAdminController.freezeBulk);
+
 // GET /api/users/:code - One user with their accesses
 router.get('/:code', Permissions.require(USER_ACCESS.MENU), UserAdminController.getUser);
 

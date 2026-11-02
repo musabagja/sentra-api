@@ -14,8 +14,12 @@ router.post('/', OpnameController.createOpname);
 // GET /api/opname - Get all opnames with pagination and filtering
 router.get('/', OpnameController.getOpnames);
 
+router.get('/stores', OpnameController.getStores);
+
 // GET /api/opname/:id - Get a specific opname by ID
 router.get('/:id', OpnameController.getOpname);
+
+router.get('/:id/berita-acara', OpnameController.getBeritaAcara);
 
 // PUT /api/opname/:id - Update a specific opname
 router.put('/:id', OpnameController.updateOpname);
@@ -28,6 +32,8 @@ router.patch('/:id/close', upload('image').fields([
   { name: 'picSignFile', maxCount: 1 },
   { name: 'documentationFile', maxCount: 2 }
 ]), generateImageURLs, OpnameController.closeOpname);
+
+router.delete('/:id/items', OpnameController.deleteOpnameItems);
 
 // DELETE /api/opname/:id - Delete a specific opname
 router.delete('/:id', OpnameController.deleteOpname);

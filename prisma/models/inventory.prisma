@@ -1,0 +1,55 @@
+//
+// INVENTARIS (barang non SIM card: catat masuk & keluar)
+//
+
+model InventoryItem {
+  id           Int      @id @default(autoincrement())
+  name         String
+  category     String?
+  minimumStock Int      @default(1)
+  stock        Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  items InventoryTransactionItem[]
+}
+
+model InventoryTransaction {
+  id               Int       @id @default(autoincrement())
+  code             String    @unique
+  type             String // "IN" (barang masuk) | "OUT" (barang keluar)
+  date             DateTime
+  note             String?
+  receivedFrom     String? // IN: pengirim
+  recipientType    String? // OUT: "STORE" (toko) | "PIC" (orang)
+  recipientName    String?
+  proofURL         String? // IN: bukti barang masuk (wajib)
+  handoverPhotoURL String? // OUT: foto penerima bersama barang (bertimestamp)
+  handoverSignURL  String? // OUT: tanda tangan penerima
+  handoverLat      Float?
+  handoverLng      Float?
+  handedOverAt     DateTime?
+  userCode         String
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user  User                      @relation(fields: [userCode], references: [code], onUpdate: NoAction, onDelete: NoAction)
+  items InventoryTransactionItem[]
+
+  @@index([type])
+  @@index([date])
+}
+
+model InventoryTransactionItem {
+  id            Int @id @default(autoincrement())
+  transactionID Int
+  itemID        Int
+  qty           Int
+  stockAfter    Int // "Sisa stok saat itu"
+
+  transaction InventoryTransaction @relation(fields: [transactionID], references: [id], onUpdate: NoAction, onDelete: NoAction)
+  item        InventoryItem        @relation(fields: [itemID], references: [id], onUpdate: NoAction, onDelete: NoAction)
+
+  @@index([transactionID])
+  @@index([itemID])
+}

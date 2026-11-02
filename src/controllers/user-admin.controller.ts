@@ -3,11 +3,17 @@ import prisma from '../../lib/prisma';
 import { Prisma } from '../../generated/prisma/client';
 
 import Bcrypt from '../utils/bcrypt.util';
-import { USER_STATUS, isRestrictedAccess } from '../utils/access.util';
+import { USER_STATUS, isRestrictedAccess, ACCESS_DEPENDENCIES, accessDependencyMessage } from '../utils/access.util';
 
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_NAME_LENGTH = 120;
 const CODE_ATTEMPTS = 5;
+
+// Bulk freeze takes at most this many codes per request (the user list has ~626 rows)
+const MAX_BULK_CODES = 1000;
+
+/** The Jabatan column and its filter dropdown (Manajemen Akun); validated at app level */
+export const USER_JABATAN = ['Promotor', 'Merchandiser', 'Sales', 'Supervisor', 'Admin'] as const;
 
 const httpError = (status: number, message: string) => {
   const err = new Error(message);
@@ -22,6 +28,7 @@ const userSelect = {
   name: true,
   circleCode: true,
   status: true,
+  jabatan: true,
   createdAt: true,
   circle: { select: { name: true } }
 } satisfies Prisma.UserSelect;
@@ -47,6 +54,35 @@ const cleanName = (value: unknown): string => {
   if (name.length > MAX_NAME_LENGTH) throw httpError(400, `Nama maksimal ${MAX_NAME_LENGTH} karakter`);
   return name;
 };
+
+/** One of USER_JABATAN, or null to clear it */
+const cleanJabatan = (value: unknown): string | null => {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !(USER_JABATAN as readonly string[]).includes(value)) {
+    throw httpError(400, `Jabatan tidak dikenal: ${String(value)}`);
+  }
+  return value;
+};
+
+/**
+ * Freeze one user and sign them out everywhere (their next request fails right away,
+ * instead of waiting for the 15-minute access token to expire). Shared by the
+ * single and bulk freeze endpoints.
+ */
+const freezeAndSignOut = (code: string) =>
+  prisma.$transaction(async (tx) => {
+    const user = await tx.user.update({
+      where: { code },
+      data: { status: USER_STATUS.FROZEN },
+      select: userSelect
+    });
+    await tx.session.deleteMany({ where: { userCode: code } });
+    return user;
+  });
+
+/** Let a frozen user sign in again. Shared by the single and bulk endpoints. */
+const activateUser = (code: string) =>
+  prisma.user.update({ where: { code }, data: { status: USER_STATUS.ACTIVE }, select: userSelect });
 
 const cleanPassword = (value: unknown): string => {
   if (typeof value !== 'string' || value.length < MIN_PASSWORD_LENGTH) {
@@ -94,6 +130,18 @@ const validateAccessCodes = async (value: unknown): Promise<string[]> => {
   if (unknown.length > 0) throw httpError(400, `Kode akses tidak dikenal: ${unknown.join(', ')}`);
 
   return requested;
+};
+
+/**
+ * V-01a: some accesses only make sense on top of another one (Serah Terima V02 needs
+ * Akses Menu V01). The final set must satisfy every dependency or the save is refused.
+ */
+const assertAccessDependencies = (codes: string[]) => {
+  for (const [dependent, required] of Object.entries(ACCESS_DEPENDENCIES)) {
+    if (codes.includes(dependent) && !codes.includes(required)) {
+      throw httpError(400, accessDependencyMessage(dependent));
+    }
+  }
 };
 
 class UserAdminController {
@@ -151,11 +199,15 @@ class UserAdminController {
 
   static async getUsers(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, search, circle, status } = req.query;
+      const { page = 1, limit = 10, search, circle, status, jabatan } = req.query;
+
+      // 1000 is also the bulk-freeze limit: "Pilih semua" must fetch every matching code at once
+      const take = Math.min(Math.max(Number(limit) || 10, 1), MAX_BULK_CODES);
 
       const where: Prisma.UserWhereInput = {};
       if (circle) where.circleCode = String(circle);
       if (status) where.status = String(status);
+      if (jabatan !== undefined) where.jabatan = cleanJabatan(jabatan);
       if (search) {
         where.OR = [
           { code: { contains: String(search) } },
@@ -163,7 +215,7 @@ class UserAdminController {
         ];
       }
 
-      // Tab counts follow the search/circle filters but not the status tab itself
+      // Tab counts follow the search/circle/jabatan filters but not the status tab itself
       const { status: _ignored, ...countWhere } = where;
 
       const [users, total, grouped] = await Promise.all([
@@ -173,8 +225,8 @@ class UserAdminController {
             ...userSelect,
             _count: { select: { permissions: true } }
           },
-          skip: (Number(page) - 1) * Number(limit),
-          take: Number(limit),
+          skip: (Number(page) - 1) * take,
+          take,
           orderBy: [{ name: 'asc' }, { id: 'asc' }]
         }),
         prisma.user.count({ where }),
@@ -263,7 +315,9 @@ class UserAdminController {
       const name = cleanName(req.body.name);
       const password = cleanPassword(req.body.password);
       const circleCode = await requireCircle(req.body.circleCode);
+      const jabatan = cleanJabatan(req.body.jabatan);
       const accessCodes = await validateAccessCodes(req.body.accessCodes ?? []);
+      assertAccessDependencies(accessCodes);
 
       const held = await callerAccessCodes(req.user!.code);
       const notHeld = accessCodes.filter((c) => !held.includes(c));
@@ -288,7 +342,7 @@ class UserAdminController {
         try {
           user = await prisma.$transaction(async (tx) => {
             const created = await tx.user.create({
-              data: { code, name, circleCode, password: passwordHash, status: USER_STATUS.ACTIVE },
+              data: { code, name, circleCode, jabatan, password: passwordHash, status: USER_STATUS.ACTIVE },
               select: userSelect
             });
             if (accessCodes.length > 0) {
@@ -327,12 +381,13 @@ class UserAdminController {
         throw httpError(400, 'Kode user tidak dapat diubah');
       }
 
-      const { name, circleCode, accessCodes, password } = req.body;
+      const { name, circleCode, jabatan, accessCodes, password } = req.body;
       const data: Prisma.UserUpdateInput = {};
       if (name !== undefined) data.name = cleanName(name);
       if (circleCode !== undefined) {
         data.circle = { connect: { code: await requireCircle(circleCode) } };
       }
+      if (jabatan !== undefined) data.jabatan = cleanJabatan(jabatan);
       if (password !== undefined && password !== '') {
         data.password = Bcrypt.hash(cleanPassword(password));
       }
@@ -341,6 +396,7 @@ class UserAdminController {
       let toRemove: string[] = [];
       if (accessCodes !== undefined) {
         const requested = await validateAccessCodes(accessCodes);
+        assertAccessDependencies(requested);
         const [held, current] = await Promise.all([
           callerAccessCodes(req.user!.code),
           callerAccessCodes(code)
@@ -400,17 +456,9 @@ class UserAdminController {
         const existing = await prisma.user.findUnique({ where: { code } });
         if (!existing) throw httpError(404, 'User tidak ditemukan');
 
-        const user = await prisma.$transaction(async (tx) => {
-          const updated = await tx.user.update({
-            where: { code },
-            data: { status: freeze ? USER_STATUS.FROZEN : USER_STATUS.ACTIVE },
-            select: userSelect
-          });
-          // Removing sessions makes the user's next request fail right away,
-          // instead of waiting for the 15-minute access token to expire
-          if (freeze) await tx.session.deleteMany({ where: { userCode: code } });
-          return updated;
-        });
+        const user = freeze
+          ? await freezeAndSignOut(code)
+          : await activateUser(code);
 
         res.status(200).json({
           message: freeze ? 'User frozen successfully' : 'User unfrozen successfully',
@@ -420,6 +468,91 @@ class UserAdminController {
         next(error);
       }
     };
+  }
+
+  /**
+   * POST /api/users/freeze-bulk — Nonaktifkan / aktifkan beberapa user sekaligus
+   * (A-02..A-11a nonaktifkan, B-01 aktifkan). The payload picks the direction:
+   * `status: "FROZEN"` (default) deactivates, `status: "ACTIVE"` activates.
+   * Every requested code is resolved on its own: a code that fails is reported in
+   * `failed` (so the client can keep it checked and retry) and never blocks the rest.
+   * Codes already in the target status count as successes (idempotent retry after A-11a).
+   */
+  static async freezeBulk(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { userCodes, status } = req.body ?? {};
+      if (!Array.isArray(userCodes) || userCodes.length === 0) {
+        throw httpError(400, 'userCodes wajib berupa array berisi minimal 1 kode user');
+      }
+      if (userCodes.some((c) => typeof c !== 'string')) {
+        throw httpError(400, 'Setiap kode user harus berupa teks');
+      }
+
+      const activate = status !== undefined && String(status).toUpperCase() === USER_STATUS.ACTIVE;
+      if (
+        status !== undefined &&
+        String(status).toUpperCase() !== USER_STATUS.ACTIVE &&
+        String(status).toUpperCase() !== USER_STATUS.FROZEN
+      ) {
+        throw httpError(400, `Status tidak dikenal: ${String(status)}`);
+      }
+
+      const codes = [...new Set(userCodes.map((c) => normalizeUserCode(c)))].filter(Boolean);
+      if (codes.length > MAX_BULK_CODES) {
+        throw httpError(400, `userCodes maksimal ${MAX_BULK_CODES} kode`);
+      }
+      if (codes.includes(req.user!.code)) {
+        throw httpError(
+          400,
+          activate
+            ? 'Anda tidak dapat mengaktifkan akun Anda sendiri'
+            : 'Anda tidak dapat membekukan akun Anda sendiri'
+        );
+      }
+
+      const found = await prisma.user.findMany({
+        where: { code: { in: codes } },
+        select: { code: true, name: true, status: true }
+      });
+      const byCode = new Map(found.map((user) => [user.code, user]));
+
+      const succeeded: { code: string; name: string }[] = [];
+      const failed: { code: string; name: string | null; reason: string }[] = [];
+      const targetStatus = activate ? USER_STATUS.ACTIVE : USER_STATUS.FROZEN;
+
+      for (const code of codes) {
+        const user = byCode.get(code);
+        if (!user) {
+          failed.push({ code, name: null, reason: 'NOT_FOUND' });
+          continue;
+        }
+        // Already in the target status: nothing to do, and the A-11a retry must not
+        // treat it as a failure
+        if (user.status === targetStatus) {
+          succeeded.push({ code: user.code, name: user.name });
+          continue;
+        }
+        try {
+          if (activate) await activateUser(code);
+          else await freezeAndSignOut(code);
+          succeeded.push({ code: user.code, name: user.name });
+        } catch {
+          failed.push({ code: user.code, name: user.name, reason: 'DATABASE_ERROR' });
+        }
+      }
+
+      // Same keys the client already consumes: `deactivated` deactivating, `activated` activating
+      const doneKey = activate ? 'activated' : 'deactivated';
+      const verb = activate ? 'diaktifkan' : 'dinonaktifkan';
+      res.status(200).json({
+        message: failed.length
+          ? `${succeeded.length} user ${verb}, ${failed.length} gagal`
+          : `${succeeded.length} user ${verb}`,
+        data: { [doneKey]: succeeded, failed }
+      });
+    } catch (error) {
+      next(error);
+    }
   }
 }
 

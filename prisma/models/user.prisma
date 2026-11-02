@@ -7,6 +7,7 @@ model User {
   imageURL   String?
   password   String?
   status     String   @default("ACTIVE")
+  jabatan    String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   circleCode String
@@ -24,6 +25,7 @@ model User {
   opnames                  Opname[]
   opnameUpdates            OpnameUpdate[]
   opnameSubmittances       OpnameSubmittance[]
+  inventoryTransactions    InventoryTransaction[]
 }
 
 model Access {

@@ -3,6 +3,13 @@ import { wibEndOfDay, wibStartOfDay } from '../utils/wib.util';
 import prisma from "../../lib/prisma";
 
 import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle, circleScope } from "../utils/access.util";
+import { buildBeritaAcaraPdf, imageDataFromRef } from "../utils/berita-acara.util";
+
+const httpError = (status: number, message: string) => {
+  const err = new Error(message);
+  (err as any).status = status;
+  return err;
+};
 
 class OpnameController {
   static async updateOpnameProgress(req: Request, res: Response, next: NextFunction) {
@@ -228,7 +235,8 @@ class OpnameController {
     try {
       const { id } = req.params;
       const allowed = req.checkpointCodes ?? [];
-      const { signURL, picSignURL, picName, documentationURL, note } = req.body;
+      const { signURL, picSignURL, picName, documentationURL, note, unscanned } = req.body;
+      const unscannedMode = unscanned === 'UNCHECKED' ? 'UNCHECKED' : 'LOST';
 
       // documentationURL may be a single string or an array (2 files max)
       const documentationURLs: string[] = (Array.isArray(documentationURL)
@@ -298,6 +306,12 @@ class OpnameController {
         if (unscannedCards.length > 0) {
           const unscannedIds = unscannedCards.map(c => c.id);
 
+          if (unscannedMode === 'UNCHECKED') {
+            await tx.card.updateMany({
+              where: { id: { in: unscannedIds } },
+              data: { status: 'VERIFIED' }
+            });
+          } else {
           // Auto-LOST: create opname updates and mark cards LOST
           await Promise.all([
             tx.opnameUpdate.createMany({
@@ -327,9 +341,12 @@ class OpnameController {
               }
             });
           }
+          }
         }
 
-        const totalProgress = scannedIds.size + unscannedCards.length;
+        const totalProgress = unscannedMode === 'UNCHECKED'
+          ? scannedIds.size
+          : scannedIds.size + unscannedCards.length;
 
         const opname = await tx.opname.update({
           where: { id: opnameId },
@@ -375,12 +392,13 @@ class OpnameController {
 
   static async getOpnames(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page = 1, limit = 10, checkpointCode, type, startDate, endDate } = req.query;
+      const { page = 1, limit = 10, checkpointCode, type, startDate, endDate, mine } = req.query;
       const circleCode = circleScope(req);
 
       const where: any = {
         checkpoint: checkpointInCircle(circleCode, checkpointCode as string | undefined)
       };
+      if (mine === 'true') where.userCode = req.user!.code;
       if (type) where.type = type;
       if (startDate || endDate) {
         where.createdAt = {
@@ -431,6 +449,7 @@ class OpnameController {
             totalGood: counts.OK,
             totalBroken: counts.BROKEN,
             totalLost: counts.LOST,
+            totalUnchecked: Math.max(0, opname.amount - (counts.OK + counts.BROKEN + counts.LOST)),
             finalCount: opname.amount - counts.BROKEN - counts.LOST
           }
         };
@@ -537,6 +556,7 @@ class OpnameController {
               totalGood,
               totalBroken,
               totalLost,
+              totalUnchecked: Math.max(0, opname.amount - totalScanned),
               finalCount: opname.amount - totalBroken - totalLost
             },
             items,
@@ -719,6 +739,165 @@ class OpnameController {
       res.status(200).json({
         message: 'Opname deleted successfully'
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async getStores(req: Request, res: Response, next: NextFunction) {
+    try {
+      const circleCode = circleScope(req);
+      const search = req.query.search ? String(req.query.search) : '';
+      const scope = checkpointInCircle(circleCode);
+
+      const [checkpoints, cardCounts, running] = await Promise.all([
+        prisma.checkpoint.findMany({
+          where: {
+            ...scope,
+            type: { in: ['STORE', 'DC'] },
+            ...(search ? { OR: [{ name: { contains: search } }, { code: { contains: search } }] } : {})
+          },
+          select: { code: true, name: true, type: true },
+          orderBy: { name: 'asc' }
+        }),
+        prisma.card.groupBy({
+          by: ['checkpointCode'],
+          where: { checkpoint: scope, status: 'VERIFIED' },
+          _count: { _all: true }
+        }),
+        prisma.opname.findMany({
+          where: { checkpoint: scope, status: 'ONGOING' },
+          select: { id: true, checkpointCode: true }
+        })
+      ]);
+
+      const countByCode = new Map(cardCounts.map((row) => [row.checkpointCode, row._count._all]));
+      const runningByCode = new Map(running.map((row) => [row.checkpointCode, row.id]));
+
+      res.status(200).json({
+        message: 'Stores retrieved successfully',
+        data: {
+          stores: checkpoints.map((checkpoint) => ({
+            code: checkpoint.code,
+            name: checkpoint.name,
+            type: checkpoint.type,
+            cardCount: countByCode.get(checkpoint.code) ?? 0,
+            ongoingOpnameID: runningByCode.get(checkpoint.code) ?? null
+          }))
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async deleteOpnameItems(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
+      const raw = (req.body ?? {}).itemIDs;
+      const itemIDs = Array.isArray(raw)
+        ? [...new Set(raw.map(Number).filter((value: number) => Number.isInteger(value) && value > 0))]
+        : [];
+      if (itemIDs.length === 0) throw httpError(400, 'itemIDs wajib berupa array berisi minimal 1 id kartu');
+
+      const opname = await prisma.opname.findUnique({ where: { id: Number(id) } });
+      if (!opname || !hasCheckpointAccess(opname.checkpointCode, allowed)) {
+        throw httpError(404, 'Opname not found');
+      }
+      if (opname.status !== 'ONGOING') throw httpError(409, 'Opname is not running');
+
+      const removed = await prisma.$transaction(async (tx) => {
+        const result = await tx.opnameUpdate.deleteMany({
+          where: { opnameID: opname.id, itemID: { in: itemIDs } }
+        });
+        const remaining = await tx.opnameUpdate.count({ where: { opnameID: opname.id } });
+        await tx.opname.update({ where: { id: opname.id }, data: { progress: remaining } });
+        return result.count;
+      });
+
+      res.status(200).json({
+        message: `${removed} kartu kembali ke Belum dicek`,
+        data: { removed, itemIDs }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async getBeritaAcara(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      const allowed = req.checkpointCodes ?? [];
+
+      const opname = await prisma.opname.findUnique({
+        where: { id: Number(id) },
+        include: {
+          checkpoint: { select: { code: true, name: true, type: true } },
+          user: { select: { code: true, name: true } },
+          submittance: true,
+          updates: { select: { itemID: true, status: true } }
+        }
+      });
+      if (!opname || !hasCheckpointAccess(opname.checkpointCode, allowed)) {
+        throw httpError(404, 'Opname not found');
+      }
+      if (opname.status !== 'COMPLETED') {
+        throw httpError(400, 'Berita acara baru tersedia setelah laporan dikirim');
+      }
+
+      const cards = await prisma.card.findMany({
+        where: { id: { in: opname.updates.map((update) => update.itemID) } },
+        select: { id: true, key: true }
+      });
+      const keyByItem = new Map(cards.map((card) => [card.id, card.key]));
+
+      const kondisiLabel: Record<string, string> = { OK: 'Baik', BROKEN: 'Rusak', LOST: 'Hilang' };
+      const rows = opname.updates
+        .map((update) => ({
+          iccid: keyByItem.get(update.itemID) ?? String(update.itemID),
+          kondisi: kondisiLabel[update.status] ?? update.status
+        }))
+        .sort((a, b) => a.iccid.localeCompare(b.iccid))
+        .map((row, index) => ({ no: index + 1, ...row }));
+
+      const counts = opname.updates.reduce(
+        (acc, update) => {
+          acc[update.status] = (acc[update.status] ?? 0) + 1;
+          return acc;
+        },
+        {} as Record<string, number>
+      );
+
+      const [signImage, picSignImage] = await Promise.all([
+        imageDataFromRef(opname.submittance?.signURL),
+        imageDataFromRef(opname.submittance?.picSignURL)
+      ]);
+
+      const pdf = await buildBeritaAcaraPdf({
+        docNumber: opname.batch,
+        storeLabel: opname.checkpoint ? `${opname.checkpoint.name} (${opname.checkpoint.code})` : opname.checkpointCode,
+        date: opname.submittance?.createdAt ?? opname.createdAt,
+        pelaksanaName: opname.user.name,
+        picName: opname.submittance?.picName ?? null,
+        companyName: process.env.COMPANY_NAME || 'MyWorkSpace',
+        summary: {
+          baik: counts.OK ?? 0,
+          rusak: counts.BROKEN ?? 0,
+          belum: Math.max(0, opname.amount - opname.updates.length),
+          total: opname.amount
+        },
+        cards: rows,
+        signImage,
+        picSignImage
+      });
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `inline; filename="berita-acara-${opname.batch.replace(/[\\/]/g, '-')}.pdf"`
+      );
+      res.status(200).end(pdf);
     } catch (error) {
       next(error);
     }

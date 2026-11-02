@@ -5,6 +5,7 @@ import prisma from "../../lib/prisma";
 import { Prisma } from '../../generated/prisma/client';
 import { hasCheckpointAccess, resolveCheckpointFilter, checkpointInCircle, circleScope } from "../utils/access.util";
 import { chunkArray, fetchChunked, normalizeKeyCell } from '../utils/upload.util';
+import { wibStartOfDay, wibToday } from '../utils/wib.util';
 
 // A batch of thousands of cards touches many rows: the default 5s transaction limit is not enough.
 const TX_OPTIONS = { timeout: Number(process.env.UPLOAD_TX_TIMEOUT_MS) || 120000, maxWait: 10000 };
@@ -13,6 +14,9 @@ const TX_OPTIONS = { timeout: Number(process.env.UPLOAD_TX_TIMEOUT_MS) || 120000
 type BatchPrefix = 'DV' | 'DX';
 
 const MAX_UPLOAD_ROWS = 100000;
+// "Tandai Terkirim": schedules per request (a page of the list) and the length of the note
+const MAX_MANUAL_HANDOVER = 100;
+const MAX_MANUAL_NOTE = 500;
 const MAX_ROWS_PER_PROBLEM = 1000;
 
 // What can stop an Excel send. Each problem says what it is and how to fix it (shown to the person
@@ -446,6 +450,95 @@ const analyseExcelSend = async (req: Request) => {
 };
 
 
+type DeliverableDistribution = {
+  id: number;
+  sourceCode: string;
+  targetCode: string;
+  items: { itemKey: string; card: { id: number } }[];
+};
+
+/**
+ * Serah terima of one distribution, inside the caller's transaction: the cards (still in DELIVERY at
+ * the source) move to the target as VERIFIED, a TRANSFER movement is written for each, both stocks get
+ * a new snapshot, and the distribution becomes DELIVERED with its submittance. Shared by the serah
+ * terima on site and by "Tandai Terkirim" (admin), so the two can never move stock differently.
+ */
+const deliverDistribution = async (
+  tx: Prisma.TransactionClient,
+  distribution: DeliverableDistribution,
+  userCode: string,
+  submittanceData: Omit<Prisma.DistributionSubmittanceUncheckedCreateInput, 'distributionID' | 'userCode'>,
+  completedAt: Date = new Date()
+) => {
+  const itemKeys = distribution.items.map((item) => item.itemKey);
+
+  // Validate before writing — if cards are gone the transaction rolls back cleanly
+  let holdCount = 0;
+  for (const keys of chunkArray(itemKeys)) {
+    holdCount += await tx.card.count({
+      where: { key: { in: keys }, checkpointCode: distribution.sourceCode, status: 'DELIVERY' }
+    });
+  }
+  // Newest snapshot; the id breaks ties when several deliveries in one transaction share a timestamp
+  const [sourceStock, targetStock] = await Promise.all([
+    tx.cardStock.findFirst({
+      where: { checkpointCode: distribution.sourceCode },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
+    }),
+    tx.cardStock.findFirst({
+      where: { checkpointCode: distribution.targetCode },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
+    })
+  ]);
+
+  if (holdCount !== itemKeys.length) {
+    const err = new Error('Some cards are no longer available for distribution');
+    (err as any).status = 409;
+    throw err;
+  }
+
+  if (!sourceStock) {
+    throw new Error('Source checkpoint has no stock record');
+  }
+
+  const submittance = await tx.distributionSubmittance.create({
+    data: { ...submittanceData, distributionID: distribution.id, userCode }
+  });
+
+  await tx.distribution.update({
+    where: { id: distribution.id },
+    data: { status: 'DELIVERED', completedAt }
+  });
+
+  for (const keys of chunkArray(itemKeys)) {
+    await tx.card.updateMany({
+      where: { key: { in: keys } },
+      data: { checkpointCode: distribution.targetCode, status: 'VERIFIED' }
+    });
+  }
+  for (const chunk of chunkArray(distribution.items, 300)) {
+    await tx.cardMovement.createMany({
+      data: chunk.map((item) => ({
+        cardID: item.card.id,
+        type: 'TRANSFER',
+        userCode,
+        sourceCode: distribution.sourceCode,
+        targetCode: distribution.targetCode
+      }))
+    });
+  }
+
+  await tx.cardStock.create({
+    data: { checkpointCode: distribution.sourceCode, amount: Math.max(0, sourceStock.amount - itemKeys.length) }
+  });
+  await tx.cardStock.create({
+    data: { checkpointCode: distribution.targetCode, amount: (targetStock?.amount ?? 0) + itemKeys.length }
+  });
+
+  return submittance;
+};
+
+
 class DistributionController {
   // ============================================================================
   // DISTRIBUTION CRUD OPERATIONS
@@ -745,6 +838,8 @@ class DistributionController {
                 items: true
               }
             },
+            // "Ditandai Admin" marker of the list (Tandai Terkirim): who, when, which handover day
+            submittance: { select: { isManual: true, handoverAt: true, note: true, createdAt: true, user: { select: { name: true } } } },
             source: true,
             target: true
           },
@@ -782,7 +877,7 @@ class DistributionController {
           ...(req.query.items === 'false'
             ? { _count: { select: { items: true } } }
             : { items: { include: { card: true } } }),
-          submittance: true,
+          submittance: { include: { user: { select: { name: true } } } },
           source: true,
           target: true
         }
@@ -1039,91 +1134,16 @@ class DistributionController {
           throw err;
         }
 
-        const itemKeys = distribution.items.map(item => item.itemKey);
-
-        // Validate before writing — if cards are gone the transaction rolls back cleanly
-        let holdCount = 0;
-        for (const keys of chunkArray(itemKeys)) {
-          holdCount += await tx.card.count({
-            where: { key: { in: keys }, checkpointCode: distribution.sourceCode, status: 'DELIVERY' }
-          });
-        }
-        const [sourceStock, targetStock] = await Promise.all([
-          tx.cardStock.findFirst({
-            where: { checkpointCode: distribution.sourceCode },
-            orderBy: { createdAt: 'desc' }
-          }),
-          tx.cardStock.findFirst({
-            where: { checkpointCode: distribution.targetCode },
-            orderBy: { createdAt: 'desc' }
-          })
-        ]);
-
-        if (holdCount !== itemKeys.length) {
-          const err = new Error('Some cards are no longer available for distribution');
-          (err as any).status = 409;
-          throw err;
-        }
-
-        if (!sourceStock) {
-          throw new Error('Source checkpoint has no stock record');
-        }
-
-        const submittance = await tx.distributionSubmittance.create({
-          data: {
-            distributionID: Number(id),
-            userCode: user.code,
-            longitude: longitude ? Number(longitude) : null,
-            latitude: latitude ? Number(latitude) : null,
-            signURL: signURL || null,
-            imageURL: imageURL || null,
-            storeURL: storeURL || null,
-            recipientURL: recipientURL || null,
-            note: note || null,
-            recipientName: recipientName || null
-          }
+        const submittance = await deliverDistribution(tx, distribution, user.code, {
+          longitude: longitude ? Number(longitude) : null,
+          latitude: latitude ? Number(latitude) : null,
+          signURL: signURL || null,
+          imageURL: imageURL || null,
+          storeURL: storeURL || null,
+          recipientURL: recipientURL || null,
+          note: note || null,
+          recipientName: recipientName || null
         });
-
-        await tx.distribution.update({
-          where: { id: Number(id) },
-          data: {
-            status: "DELIVERED",
-            completedAt: new Date()
-          }
-        });
-
-        for (const keys of chunkArray(itemKeys)) {
-          await tx.card.updateMany({
-            where: { key: { in: keys } },
-            data: { checkpointCode: distribution.targetCode, status: "VERIFIED" }
-          });
-        }
-        for (const chunk of chunkArray(distribution.items, 300)) {
-          await tx.cardMovement.createMany({
-            data: chunk.map(item => ({
-              cardID: item.card.id,
-              type: "TRANSFER",
-              userCode: user.code,
-              sourceCode: distribution.sourceCode,
-              targetCode: distribution.targetCode
-            }))
-          });
-        }
-
-        await Promise.all([
-          tx.cardStock.create({
-            data: {
-              checkpointCode: distribution.sourceCode,
-              amount: Math.max(0, sourceStock.amount - itemKeys.length)
-            }
-          }),
-          tx.cardStock.create({
-            data: {
-              checkpointCode: distribution.targetCode,
-              amount: (targetStock?.amount ?? 0) + itemKeys.length
-            }
-          })
-        ]);
 
         return submittance
       }, TX_OPTIONS)
@@ -1132,6 +1152,102 @@ class DistributionController {
       res.status(200).json({
         message: 'Distribution submitted successfully',
         data: { submittance }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * "Tandai Terkirim" (admin, access SA02): records several Terjadwal schedules as delivered at once,
+   * for goods that reached the destination without a serah terima in the app. Every schedule goes
+   * through the same delivery as a serah terima (cards and stock move to the target); the submittance
+   * says it was marked by an admin, on which handover day and why. All or nothing: if one schedule
+   * can't be marked, none is. Sending the same request again after it succeeded answers 200, so a
+   * "Coba lagi" after a lost answer does not fail.
+   */
+  static async submitManualDistributions(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { ids, handoverAt, note } = req.body ?? {};
+      const allowed = req.checkpointCodes ?? [];
+
+      const distributionIds: number[] = Array.isArray(ids)
+        ? [...new Set(ids.map((id: unknown) => Number(id)))].filter((id) => Number.isInteger(id) && id > 0)
+        : [];
+      if (distributionIds.length === 0 || distributionIds.length !== (Array.isArray(ids) ? new Set(ids.map(String)).size : 0)) {
+        throw httpError(422, 'Pilih jadwal yang akan ditandai terkirim.');
+      }
+      if (distributionIds.length > MAX_MANUAL_HANDOVER) {
+        throw httpError(422, `Maksimal ${MAX_MANUAL_HANDOVER} jadwal sekaligus.`);
+      }
+      const noteText = typeof note === 'string' ? note.trim() : '';
+      if (!noteText) throw httpError(422, 'Catatan wajib diisi.');
+      if (noteText.length > MAX_MANUAL_NOTE) throw httpError(422, `Catatan maksimal ${MAX_MANUAL_NOTE} karakter.`);
+      if (typeof handoverAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(handoverAt)) {
+        throw httpError(422, 'Tanggal serah terima wajib diisi.');
+      }
+      let handoverDay: Date;
+      try {
+        handoverDay = wibStartOfDay(handoverAt);
+      } catch {
+        throw httpError(422, 'Tanggal serah terima tidak valid.');
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const distributions = await tx.distribution.findMany({
+          where: { id: { in: distributionIds } },
+          include: { items: { include: { card: { select: { id: true } } } }, submittance: { select: { isManual: true } } }
+        });
+        const inScope = distributions.filter((d) => hasCheckpointAccess(d.sourceCode, allowed));
+        if (inScope.length !== distributionIds.length) {
+          throw httpError(404, 'Sebagian jadwal tidak ditemukan. Muat ulang halaman, lalu pilih lagi.');
+        }
+
+        // Already done by an earlier attempt of this same request: answer as if it succeeded now
+        if (inScope.every((d) => d.status === 'DELIVERED' && d.submittance?.isManual)) {
+          return { marked: 0, alreadyDone: true };
+        }
+
+        const notScheduled = inScope.filter((d) => d.status !== 'SCHEDULED');
+        if (notScheduled.length > 0) {
+          throw httpError(
+            409,
+            `${notScheduled.length} jadwal tidak lagi berstatus Terjadwal (${notScheduled
+              .slice(0, 5)
+              .map((d) => d.batch ?? `#${d.id}`)
+              .join(', ')}${notScheduled.length > 5 ? ', ...' : ''}). Muat ulang halaman, lalu pilih lagi.`
+          );
+        }
+
+        // The handover can't be before the latest send date of the chosen schedules, nor in the future
+        const earliest = inScope.reduce(
+          (max, d) => (d.scheduledAt && wibStartOfDay(d.scheduledAt) > max ? wibStartOfDay(d.scheduledAt) : max),
+          new Date(0)
+        );
+        if (handoverDay < earliest) {
+          throw httpError(422, 'Tanggal serah terima tidak boleh sebelum tanggal kirim jadwal yang dipilih.');
+        }
+        if (handoverDay > wibToday()) {
+          throw httpError(422, 'Tanggal serah terima tidak boleh melewati hari ini.');
+        }
+
+        for (const distribution of inScope) {
+          await deliverDistribution(
+            tx,
+            distribution,
+            req.user!.code,
+            { isManual: true, handoverAt: handoverDay, note: noteText },
+            handoverDay
+          );
+        }
+        return { marked: inScope.length, alreadyDone: false };
+      }, TX_OPTIONS);
+
+      res.status(200).json({
+        message: result.alreadyDone
+          ? 'Jadwal sudah ditandai terkirim.'
+          : `${result.marked} jadwal ditandai terkirim.`,
+        data: result
       });
     } catch (error) {
       next(error);

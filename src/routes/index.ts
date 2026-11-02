@@ -8,6 +8,9 @@ import checkpointRouter from './checkpoint';
 import circleRouter from './circle';
 import accessRouter from './access';
 import usersRouter from './users';
+import inventoryRouter from './inventory';
+import minioRouter from './minio';
+import prodisRouter from './prodis';
 import errorHandler from '../middlewares/error.handler';
 import Auth from '../middlewares/auth.handler';
 import CheckpointAccess from '../middlewares/checkpoint-access.handler';
@@ -20,6 +23,8 @@ const router = express.Router();
 
 // User authentication routes (no auth required)
 router.use('/user', userRouter);
+
+router.use('/prodis', prodisRouter);
 
 // Health check — must be before auth middleware
 router.get("/", (req: any, res: any) => {
@@ -63,5 +68,10 @@ router.use('/access', accessRouter);
 
 // User management routes (User menu)
 router.use('/users', usersRouter);
+
+router.use('/inventory', inventoryRouter);
+
+// MinIO storage routes (bucket management)
+router.use('/minio', minioRouter);
 
 export default router;
