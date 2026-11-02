@@ -11,7 +11,9 @@ class ProdisAuthController {
       }
 
       const employee = await resolveEmployee(raw);
-      const accessToken = JWT.sign({ code: employee.code, name: employee.name }, { expiresIn: '7d' });
+      // Scoped to the PJP app: Auth.authenticate rejects any token with an audience, so this token
+      // can't be used against the main API
+      const accessToken = JWT.sign({ code: employee.code, name: employee.name }, { expiresIn: '7d', audience: 'pjp' });
 
       prodisOk(
         res,
